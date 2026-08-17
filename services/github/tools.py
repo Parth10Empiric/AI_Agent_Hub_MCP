@@ -1,6 +1,6 @@
 from mcp.server import MCPServer
 
-from .service import GitHubService
+from .services import GitHubService
 from .tool_helpers import github_tool
 
 github = GitHubService()

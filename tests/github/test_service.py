@@ -1,6 +1,6 @@
 import asyncio
 
-from services.github.service import GitHubService
+from services.github.services import GitHubService
 
 
 async def main():
