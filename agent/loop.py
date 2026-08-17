@@ -6,7 +6,7 @@ from ollama import chat
 
 MODEL = "minimax-m3:cloud"
 
-MAX_TOOL_ROUNDS = 6
+MAX_TOOL_ROUNDS = 50
 
 def mcp_tool_to_ollama_tool(tool: Any) -> dict:
     """

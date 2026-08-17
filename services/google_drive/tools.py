@@ -4,6 +4,7 @@ from mcp.server import MCPServer
 
 from .errors import GoogleDriveError
 from .services import GoogleDriveService
+from core.tool_utils import handle_tool_error
 
 
 def register_google_drive_tools(mcp: MCPServer) -> None:
@@ -43,10 +44,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_get_file(
@@ -73,10 +71,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_list_folder(
@@ -106,10 +101,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     # ============================================================
     # FILE CONTENT
@@ -142,10 +134,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_download_file(
@@ -176,10 +165,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     # ============================================================
     # FILE MANAGEMENT
@@ -219,10 +205,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_upload_file(
@@ -252,10 +235,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_update_file(
@@ -288,10 +268,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_move_file(
@@ -321,10 +298,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_delete_file(
@@ -352,10 +326,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     # ============================================================
     # FOLDER MANAGEMENT
@@ -389,10 +360,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     # ============================================================
     # SHARING / PERMISSIONS
@@ -423,10 +391,7 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)
 
     @mcp.tool()
     def google_drive_create_permission(
@@ -459,7 +424,4 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
             }
 
         except GoogleDriveError as exc:
-            return {
-                "success": False,
-                "error": str(exc),
-            }
+            return handle_tool_error(exc)

@@ -41,10 +41,13 @@ async def main():
             )
 
             while True:
+                try:
 
-                user_message = input(
-                    "\nYou: "
-                ).strip()
+                    user_message = input(
+                        "\nYou: "
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    break
 
                 if not user_message:
                     continue
@@ -70,4 +73,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+        print("\nGoodbye!")
