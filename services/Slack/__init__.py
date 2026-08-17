@@ -1,0 +1,3 @@
+"""
+Slack MCP service.
+"""
