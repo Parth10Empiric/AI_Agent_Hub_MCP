@@ -6,6 +6,7 @@ from mcp.server import MCPServer
 from services.github.tools import register_github_tools
 from services.google_drive.tools import register_google_drive_tools
 from services.slack.tools import register_slack_tools
+from services.google_calendar.tools import register_google_calendar_tools
 
 def main():
     setup_logging()
@@ -22,6 +23,7 @@ def main():
     register_github_tools(mcp)
     register_google_drive_tools(mcp)
     register_slack_tools(mcp)
+    register_google_calendar_tools(mcp)
 
     logger.info(
         "MCP services registered successfully"

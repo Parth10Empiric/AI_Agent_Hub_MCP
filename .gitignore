@@ -2,5 +2,10 @@ venv/
 .env
 __pycache__/
 *.pyc
+
+# --- secrets: never commit ---
 credentials.json
 token.json
+*token*.json
+*_token.json
+google_calendar_token.json
