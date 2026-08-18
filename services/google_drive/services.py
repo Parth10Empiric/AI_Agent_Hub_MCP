@@ -11,6 +11,8 @@ from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from config.settings import resolve_path, settings
+
 from .errors import (
     GoogleDriveAPIError,
     GoogleDriveAuthenticationError,
@@ -34,11 +36,30 @@ class GoogleDriveService:
 
     def __init__(
         self,
-        credentials_path: str = "credentials.json",
-        token_path: str = "token.json",
+        credentials_path: str | None = None,
+        token_path: str | None = None,
     ) -> None:
-        self.credentials_path = Path(credentials_path)
-        self.token_path = Path(token_path)
+        # Absolute paths from config, not bare relative strings.
+        #
+        # These used to default to "credentials.json" and "token.json",
+        # which Path() resolves against the CURRENT WORKING DIRECTORY -
+        # and this service runs inside the MCP server subprocess, whose
+        # working directory is whatever the client happened to be
+        # started from.
+        #
+        # The result: the saved token was never found again, so
+        # _authenticate() fell through to run_local_server() and opened
+        # a browser consent window on EVERY Drive call. That is what
+        # made a single search_files take 21.9 seconds and then fail.
+        #
+        # google_calendar/services.py already did this correctly with
+        # BASE_DIR - Drive was the odd one out.
+        self.credentials_path = resolve_path(
+            credentials_path or settings.google_credentials_path
+        )
+        self.token_path = resolve_path(
+            token_path or settings.google_token_path
+        )
 
         self._credentials: Credentials | None = None
         self._service: Resource | None = None

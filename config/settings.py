@@ -8,6 +8,30 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def resolve_path(value: str | Path) -> Path:
+    """
+    Anchor a configured path to the project root.
+
+    Paths in `.env` are usually written relative ("token.json"), which
+    Python resolves against the CURRENT WORKING DIRECTORY. That is fine
+    in a script and wrong in this project, because the MCP server runs
+    as a subprocess whose working directory is wherever the client
+    happened to be launched from.
+
+    The symptom was subtle and expensive: Google Drive saved its OAuth
+    token, could not find it again on the next run, and silently fell
+    back to opening a browser consent window on every single call - a
+    21-second delay per tool call that looked like a broken integration.
+
+    Absolute paths are passed through untouched, so this is safe to
+    apply to any configured path.
+    """
+
+    path = Path(value)
+
+    return path if path.is_absolute() else (BASE_DIR / path)
+
+
 @dataclass(frozen=True)
 class Settings:
     """
