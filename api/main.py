@@ -12,7 +12,15 @@ from agent.engine import AgentEngine
 from api.credentials import build_credential_store
 from api.db.session import build_engine, build_sessionmaker
 from api.mcp.provider import SharedSessionProvider
-from api.routers import agents, auth, conversations, health, plugins
+from api.routers import (
+    agents,
+    auth,
+    chat,
+    conversations,
+    health,
+    plugins,
+    stream,
+)
 from api.settings import APISettings, get_settings
 
 # Imported for its SIDE EFFECT: importing the models registers them on
@@ -142,6 +150,8 @@ def create_app(settings: APISettings | None = None) -> FastAPI:
     app.include_router(agents.router)
     app.include_router(conversations.agent_router)
     app.include_router(conversations.router)
+    app.include_router(chat.router)
+    app.include_router(stream.router)
 
     return app
 

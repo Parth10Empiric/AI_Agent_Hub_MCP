@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
@@ -12,6 +13,23 @@ from core.logging import get_logger
 
 
 logger = get_logger(__name__)
+
+
+# api/mcp/provider.py -> api/mcp -> api -> the project root.
+#
+# server.py MUST be addressed absolutely. A relative "server.py" is
+# resolved against the CURRENT WORKING DIRECTORY, so the MCP subprocess
+# starts only when the API happens to be launched from the project
+# root - and fails with "can't open file" from anywhere else: a
+# systemd unit with a different WorkingDirectory, a test run from
+# another folder, a Docker entrypoint.
+#
+# This is the identical bug config.settings.resolve_path() was written
+# to fix for the Google token, in a new place. Relative paths in a
+# subprocess are a recurring trap, not a one-off.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+MCP_SERVER_SCRIPT = PROJECT_ROOT / "server.py"
 
 
 @runtime_checkable
@@ -92,7 +110,7 @@ class SharedSessionProvider:
         # project's dependencies. The subprocess must be the SAME
         # interpreter running the API.
         self._command = command or sys.executable
-        self._args = args or ["server.py"]
+        self._args = args or [str(MCP_SERVER_SCRIPT)]
         self._startup_timeout = startup_timeout
 
         self._session: ClientSession | None = None
@@ -123,6 +141,13 @@ class SharedSessionProvider:
                         StdioServerParameters(
                             command=self._command,
                             args=self._args,
+
+                            # The subprocess inherits OUR working
+                            # directory otherwise, and the MCP server
+                            # resolves its own relative paths - the
+                            # Google token, credentials.json - against
+                            # it.
+                            cwd=str(PROJECT_ROOT),
                         )
                     )
                 )
