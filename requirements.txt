@@ -12,6 +12,8 @@ charset-normalizer==3.5.1
 click==8.4.2
 colorama==0.4.6
 cryptography==50.0.0
+dnspython==2.8.0
+email-validator==2.3.0
 fastapi==0.141.1
 google-api-core==2.34.0
 google-api-python-client==2.198.0
