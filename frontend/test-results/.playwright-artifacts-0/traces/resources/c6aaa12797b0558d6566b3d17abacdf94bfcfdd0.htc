@@ -1,0 +1,16 @@
+1:"$Sreact.fragment"
+2:I[9766,[],""]
+3:I[8924,[],""]
+4:I[1959,[],"ClientPageRoot"]
+5:I[5208,["707","static/chunks/707-72caa9baabe49252.js","743","static/chunks/743-491b5d865ac9d23e.js","619","static/chunks/619-ba102abea3e3d0e4.js","455","static/chunks/455-1170697619550ca6.js","247","static/chunks/247-d72bc6a98cfba3cb.js","518","static/chunks/518-789415efc551f663.js","210","static/chunks/210-7eb80d1c93c72da2.js","178","static/chunks/178-c72b42962c2244b1.js","264","static/chunks/264-f34aec20d47a7f57.js","975","static/chunks/975-589878c6a6aa4d48.js","831","static/chunks/app/(app)/agents/%5Bid%5D/chat/page-fb064c411763c91f.js"],"default"]
+6:I[4431,[],"OutletBoundary"]
+8:I[5278,[],"AsyncMetadataOutlet"]
+a:I[4431,[],"ViewportBoundary"]
+c:I[4431,[],"MetadataBoundary"]
+d:"$Sreact.suspense"
+0:{"b":"TnNm8NYHQWWEIkClVm51z","f":[["children","(app)","children","agents","children",["id","ddac397f-5a88-46de-aeb5-d2c08225bc29","d"],[["id","ddac397f-5a88-46de-aeb5-d2c08225bc29","d"],{"children":["chat",{"children":["__PAGE__",{}]}]}],[["id","ddac397f-5a88-46de-aeb5-d2c08225bc29","d"],["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":["chat",["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":["__PAGE__",["$","$1","c",{"children":[["$","$L4",null,{"Component":"$5","searchParams":{},"params":{"id":"ddac397f-5a88-46de-aeb5-d2c08225bc29"}}],null,["$","$L6",null,{"children":["$L7",["$","$L8",null,{"promise":"$@9"}]]}]]}],{},null,false]},null,false]},null,false],["$","$1","h",{"children":[null,["$","$1","LjVY8TUNzjpsoDNg9Q1A5v",{"children":[["$","$La",null,{"children":"$Lb"}],["$","meta",null,{"name":"next-size-adjust","content":""}]]}],["$","$Lc","LjVY8TUNzjpsoDNg9Q1A5m",{"children":["$","div",null,{"hidden":true,"children":["$","$d",null,{"fallback":null,"children":"$Le"}]}]}]]}],false]],"S":false}
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}]]
+7:null
+f:I[622,[],"IconMark"]
+9:{"metadata":[["$","title","0",{"children":"Agent Hub"}],["$","meta","1",{"name":"description","content":"Connect your services. Build an agent. Ask it anything."}],["$","link","2",{"rel":"icon","href":"/favicon.ico","type":"image/x-icon","sizes":"16x16"}],["$","$Lf","3",{}]],"error":null,"digest":"$undefined"}
+e:"$9:metadata"

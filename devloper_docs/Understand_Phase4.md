@@ -1688,9 +1688,25 @@ Which is also why the message bubbles carry `data-testid`. Asserting on
 CSS classes would couple the tests to styling, so a colour change would
 break tests that have nothing to do with colour.
 
-> **The lesson underneath all four:** when a test fails, ask whether the
-> *assertion* is wrong before assuming the *app* is. Three of these
-> looked exactly like product bugs.
+This one has a sting in the tail worth knowing about. Adding the
+conversation sidebar **broke a test that had been passing** — the
+ordering test asserted on `getByText("Say hello")`, which was unique
+until the sidebar started showing that same text as a chat title.
+
+```text
+before the sidebar   "Say hello" → 1 element  → test passes
+after the sidebar    "Say hello" → 2 elements → strict mode violation
+```
+
+Nothing about message ordering changed. A loosely-written assertion
+became wrong because the page around it grew.
+
+> **The lesson underneath all five:** when a test fails, ask whether the
+> *assertion* is wrong before assuming the *app* is. Four of these five
+> looked exactly like product bugs and were not. The habit that prevents
+> them is to say **where** you are looking — `page.getByTestId(...)` or
+> `page.locator("main ...")` — instead of searching the whole document
+> and hoping the text stays unique.
 
 And one that was *not* my test's fault — it found a real bug. Typing
 into the chat immediately after clicking "+ New chat" left the Send

@@ -43,15 +43,23 @@ test.describe("how messages are displayed", () => {
     // Reload, so this reads the SORTED history from the server rather
     // than the live turn that was assembled in the browser.
     await page.reload();
-    await expect(page.getByText("Say hello")).toBeVisible({
-      timeout: 30_000,
-    });
+
+    // Scoped to the transcript. The conversation sidebar names each
+    // chat after its first message, so "Say hello" is on screen twice -
+    // once as a chat title, once as the message. An unscoped locator
+    // matches both and fails strict mode.
+    await expect(
+      page.getByTestId("user-message").filter({ hasText: "Say hello" }),
+    ).toBeVisible({ timeout: 30_000 });
 
     // Every "You" label must come before the "Agent" label that answers
     // it. Reading the rendered order top to bottom is the only way to
     // assert this - the API order is exactly what was wrong.
+    //
+    // `main` excludes the sidebar and the app navigation, so only the
+    // transcript's own role labels are counted.
     const labels = await page
-      .locator("span")
+      .locator("main span")
       .filter({ hasText: /^(You|Agent)$/ })
       .allInnerTexts();
 
