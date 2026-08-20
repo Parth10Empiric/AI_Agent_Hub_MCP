@@ -208,7 +208,7 @@ class WebApproval:
 Rule 3 is a real vulnerability class — time-of-check to time-of-use.
 The gap here is measured in minutes, which is enormous.
 
-## Auto-approve rules (optional)
+## Auto-approve rules
 
 ```text
 agent_approval_rules

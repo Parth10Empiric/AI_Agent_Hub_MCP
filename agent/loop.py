@@ -156,20 +156,35 @@ def mcp_tool_to_ollama_tool(tool: Any) -> dict:
         data = tool.model_dump()
     else:
         data = {
-            "name": tool.name,
-            "description": tool.description,
-            "inputSchema": tool.inputSchema,
+            "name": getattr(tool, "name", None),
+            "description": getattr(tool, "description", None),
+            "inputSchema": getattr(tool, "inputSchema", None)
+            or getattr(tool, "input_schema", None),
         }
+
+    # BOTH spellings, deliberately.
+    #
+    # The MCP wire format uses "inputSchema" (camelCase), but the
+    # Python SDK's field is `input_schema` and model_dump() returns the
+    # FIELD name, not the alias. Reading only "inputSchema" silently
+    # fell through to the empty-object default, so every tool reached
+    # the model with NO parameters - the model then called it with no
+    # arguments and the server rejected the call as invalid.
+    #
+    # A wrong tool schema does not raise; it just makes the agent
+    # useless. Accept either key rather than depend on SDK casing.
+    parameters = (
+        data.get("inputSchema")
+        or data.get("input_schema")
+        or {"type": "object", "properties": {}}
+    )
 
     return {
         "type": "function",
         "function": {
             "name": data["name"],
-            "description": data.get("description", ""),
-            "parameters": data.get(
-                "inputSchema",
-                {"type": "object", "properties": {}},
-            ),
+            "description": data.get("description") or "",
+            "parameters": parameters,
         },
     }
 

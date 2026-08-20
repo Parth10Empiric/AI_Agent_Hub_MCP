@@ -43,9 +43,13 @@ target_metadata = Base.metadata
 
 # Injected at runtime rather than read from alembic.ini, so the
 # password lives only in .env.
+# The "%" is DOUBLED because alembic.ini is read by configparser, where
+# a bare "%" starts an interpolation token. A percent-encoded character
+# in the password (e.g. "%40" for "@") would otherwise raise
+# ValueError: invalid interpolation syntax before a query ever runs.
 config.set_main_option(
     "sqlalchemy.url",
-    get_settings().database_url,
+    get_settings().database_url.replace("%", "%%"),
 )
 
 

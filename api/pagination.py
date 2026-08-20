@@ -93,6 +93,48 @@ class Cursor:
             raise InvalidCursor(str(exc)) from exc
 
 
+@dataclass(frozen=True)
+class StringCursor:
+    """
+    The same idea as Cursor, for tables whose primary key is a STRING.
+
+    tool_executions.id is not a UUID - it is the ExecutionRecord id,
+    e.g. "exec_0ecb4fe1c044". Reusing Cursor would mean parsing that as
+    a UUID and raising InvalidCursor on every single page request.
+
+    Everything else is identical: the pair (timestamp, id) is a total
+    order, so paging never skips or repeats a row when new executions
+    are written mid-scroll - which, for a page showing tool activity,
+    is constantly.
+    """
+
+    created_at: datetime
+    row_id: str
+
+    def encode(self) -> str:
+        payload = json.dumps(
+            {"t": self.created_at.isoformat(), "i": self.row_id},
+            separators=(",", ":"),
+        )
+
+        return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+    @classmethod
+    def decode(cls, raw: str) -> "StringCursor":
+        try:
+            padded = raw + "=" * (-len(raw) % 4)
+
+            data = json.loads(base64.urlsafe_b64decode(padded))
+
+            return cls(
+                created_at=datetime.fromisoformat(data["t"]),
+                row_id=str(data["i"]),
+            )
+
+        except Exception as exc:
+            raise InvalidCursor(str(exc)) from exc
+
+
 class Page(BaseModel, Generic[T]):
     """
     One page of results.
@@ -111,12 +153,16 @@ def build_page(
     rows: list,
     limit: int,
     key: callable,
+    cursor_cls: type = Cursor,
 ) -> tuple[list, str | None, bool]:
     """
     Turn limit+1 rows into (page, next_cursor, has_more).
 
     `key` extracts (created_at, id) from a row, so this works for
     messages, conversations, or anything else ordered the same way.
+
+    `cursor_cls` is Cursor for UUID keys and StringCursor for text
+    keys such as tool_executions.id.
     """
 
     has_more = len(rows) > limit
@@ -127,6 +173,6 @@ def build_page(
 
     if has_more and page:
         created_at, row_id = key(page[-1])
-        next_cursor = Cursor(created_at, row_id).encode()
+        next_cursor = cursor_cls(created_at, row_id).encode()
 
     return page, next_cursor, has_more

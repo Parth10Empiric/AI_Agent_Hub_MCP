@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -7,6 +8,10 @@ from agent.engine import AgentEngine
 from agent.loop import AgentTurn, run_agent
 from agent.permissions import ConsoleApproval
 from agent.routing import RoutingDecision
+
+from ollama import AsyncClient, ResponseError
+
+from config.settings import settings
 
 
 SYSTEM_PROMPT = (
@@ -142,10 +147,75 @@ def print_timeline(turn: AgentTurn) -> None:
             print(f"    {record.tool_name}: {record.error.message}")
 
 
+async def preflight_ollama() -> bool:
+    """
+    Verify the configured model actually answers before the REPL starts.
+
+    Without this, a bad model name or a missing cloud login only shows
+    up on the first message - and it surfaces as a 100-line nested
+    ExceptionGroup, because the failure crosses two anyio TaskGroups
+    (stdio_client and ClientSession) on its way out. Each one re-wraps
+    it, so the one line that matters ends up buried at the bottom.
+
+    Checking here turns that into one actionable sentence.
+    """
+
+    model = settings.ollama_model
+
+    try:
+        await AsyncClient().chat(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        return True
+
+    except ResponseError as exc:
+
+        print(f"\nOllama rejected model '{model}' "
+              f"(HTTP {exc.status_code}).")
+
+        if exc.status_code == 401:
+            # ':cloud' models are proxied by the local daemon to
+            # ollama.com, which needs an account. A fresh machine has
+            # the daemon but not the login.
+            print("\n  This model runs on Ollama Cloud and this "
+                  "machine is not signed in.")
+            print("\n  Fix it with:")
+            print("      ollama signin")
+            print("\n  Or point OLLAMA_MODEL in .env at a local "
+                  "model that supports tools:")
+            print("      ollama list          # what you already have")
+            print("      ollama show <model>  # needs 'tools' under "
+                  "Capabilities")
+
+        elif exc.status_code == 404:
+            print(f"\n  Not downloaded. Fix it with:")
+            print(f"      ollama pull {model}")
+
+        return False
+
+    except Exception as exc:
+        print(f"\nCould not reach Ollama at 127.0.0.1:11434 - {exc}")
+        print("\n  Is the daemon running?")
+        print("      ollama serve")
+        return False
+
+
 async def main() -> None:
 
+    # sys.executable, not "python".
+    #
+    # Windows ships a `python` shim, so the literal worked there.
+    # Ubuntu ships only `python3` - a bare "python" resolves solely
+    # when a venv happens to be activated, so the client broke the
+    # moment it was launched by absolute path, from an IDE, or by a
+    # supervisor.
+    #
+    # sys.executable is the interpreter already running this file, so
+    # the server subprocess is guaranteed the same venv and the same
+    # installed dependencies.
     server_params = StdioServerParameters(
-        command="python",
+        command=sys.executable,
         args=["server.py"],
     )
 
@@ -167,6 +237,11 @@ async def main() -> None:
             await engine.discover_tools(session)
 
             print_startup_summary(engine)
+
+            # Fail loudly here rather than on the user's first
+            # message, where the error is unreadable.
+            if not await preflight_ollama():
+                return
 
             messages = [
                 {
@@ -247,14 +322,28 @@ async def main() -> None:
 
                 print("\n[Agent] Executing...")
 
-                turn = await run_agent(
-                    session=session,
-                    mcp_tools=selected_mcp_tools,
-                    user_message=user_message,
-                    messages=messages,
-                    executor=engine.executor,
-                    escalate=widen,
-                )
+                try:
+                    turn = await run_agent(
+                        session=session,
+                        mcp_tools=selected_mcp_tools,
+                        user_message=user_message,
+                        messages=messages,
+                        executor=engine.executor,
+                        escalate=widen,
+                    )
+
+                except ResponseError as exc:
+                    # Let the session survive a model-side failure.
+                    # Raising here would unwind through both anyio
+                    # TaskGroups and tear down the MCP connection for
+                    # a problem that is usually transient.
+                    print(f"\nModel error (HTTP {exc.status_code}): "
+                          f"{exc.error}")
+
+                    if exc.status_code == 401:
+                        print("  Session expired - run: ollama signin")
+
+                    continue
 
                 print_timeline(turn)
 
