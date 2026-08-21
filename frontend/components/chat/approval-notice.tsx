@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -41,6 +42,22 @@ export interface RefusedCall {
   operation: string;
   risk_level: string;
   argument_keys?: string[];
+
+  /**
+   * WHY it was refused, and the two answers need different advice.
+   *
+   *   permission  the agent was never allowed to do this. The user
+   *               fixes it on the permissions screen.
+   *
+   *   approval    the agent IS allowed, but nobody was there to
+   *               confirm. The user fixes it by asking again in the
+   *               chat, where the prompt can appear.
+   *
+   * Merging them produces the worst possible message: "this needs your
+   * permission" shown to someone who has already granted it, with no
+   * hint of where to look.
+   */
+  reason?: "permission" | "approval";
 }
 
 /** Denied executions on a stored message, as refused calls. */
@@ -53,6 +70,11 @@ export function refusedFromExecutions(
       tool_name: execution.tool_name,
       operation: execution.operation,
       risk_level: execution.risk_level,
+      reason:
+        (execution.error as { code?: string } | null)?.code ===
+        "permission_denied"
+          ? ("permission" as const)
+          : ("approval" as const),
     }));
 }
 
@@ -65,6 +87,10 @@ export function refusedFromApprovals(
     operation: approval.operation,
     risk_level: approval.risk_level,
     argument_keys: approval.argument_keys ?? undefined,
+
+    // This list only ever holds calls that needed a human. A scope
+    // refusal never reaches it - it is denied before anyone is asked.
+    reason: "approval" as const,
   }));
 }
 
@@ -73,42 +99,46 @@ export function refusedFromApprovals(
  *
  * WHAT THIS IS, AND WHAT IT IS NOT
  *
- * Phase 4.7 describes a dialog with Approve and Cancel buttons, where
- * clicking Approve lets the tool run. This is NOT that dialog, because
- * the backend cannot do that yet and pretending otherwise would be the
- * worst possible outcome.
+ * This is the AFTERMATH view: calls that were refused because nobody
+ * could be asked. It is not the approval prompt - that is
+ * components/approvals/approval-request.tsx, which appears live in the
+ * chat while the turn is suspended, shows the real argument VALUES and
+ * has working Approve and Deny buttons.
  *
- * Today, api/approvals.py DENIES any call that needs confirmation. It
- * records the refusal as `denied` (not `failed` - nothing broke) and
- * reports it in `approvals_required`. That was a deliberate choice, and
- * the reasoning in that file is worth reading: auto-approving would be
- * one line and the wrong line, because the approval flag would still
- * LOOK enabled in the UI while doing nothing.
+ * Both exist because the backend has two approval handlers, and which
+ * one runs depends on whether the caller can wait (api/approvals.py):
  *
- * Making Approve actually execute needs a suspendable agent turn -
- * persist the pending call, return, and re-enter the loop when the user
- * clicks. That is Phase 5.
+ *   WebApproval        the streaming chat endpoint. Suspends the turn
+ *                      and asks. -> approval-request.tsx
  *
- * So this component tells the truth: it explains what was blocked, why,
- * and what the user can do about it right now. A button that lies about
- * what it does is worse than no button.
+ *   DeferredApproval   a plain POST, a CLI, a scheduled job. Nobody is
+ *                      watching, so it denies and reports. -> here
+ *
+ * It is also what a STORED turn shows: executions with status
+ * `denied`, read back from the database long after the dialog is gone.
  *
  * ON ARGUMENTS
  *
- * Phase 4.7 rightly insists on showing the ACTUAL arguments - "Approve
- * this action?" with no detail trains people to click Approve blindly.
- * The backend currently sends `argument_keys` only: the NAMES the call
- * would have used, not the values. So the names are what is shown, and
- * the gap is stated plainly rather than papered over.
+ * This view has `argument_keys` only - the NAMES a refused call would
+ * have used, never the values. That is correct here: nobody is being
+ * asked to make a decision, so the values would be shown to no one and
+ * logged to everyone. The live prompt is the opposite, and for the
+ * same reason - there, the values ARE the decision.
  */
 export function ApprovalNotice({
   approvals,
+  agentId,
 }: {
   approvals: RefusedCall[];
+  agentId?: string;
 }) {
   const [detail, setDetail] = useState<RefusedCall | null>(null);
 
   if (approvals.length === 0) return null;
+
+  // If ANY of them was a permission refusal, the permission advice is
+  // the one that unblocks the user - so it wins.
+  const blocked = approvals.some((a) => a.reason === "permission");
 
   return (
     <div className="my-3 rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950">
@@ -119,8 +149,26 @@ export function ApprovalNotice({
       </p>
 
       <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">
-        Nothing was changed in your accounts. These tools always ask
-        first.
+        {blocked ? (
+          <>
+            Nothing was changed in your accounts. This agent has not been
+            allowed to do this
+            {agentId ? (
+              <>
+                {" - "}
+                <Link
+                  href={`/agents/${agentId}/permissions`}
+                  className="underline"
+                >
+                  review its permissions
+                </Link>
+              </>
+            ) : null}
+            .
+          </>
+        ) : (
+          "Nothing was changed in your accounts. These tools always ask first."
+        )}
       </p>
 
       <ul className="mt-3 space-y-1.5">
@@ -213,11 +261,11 @@ export function ApprovalNotice({
               </dl>
 
               <p className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-                Approving an action from here is not available yet.
-                Nothing in your account was changed. If you want this
-                agent to be able to do this without asking, you can turn
-                the tool on in its settings - but think about it first,
-                because it will then run without stopping to check.
+                Nothing in your account was changed. This was asked
+                outside a live chat - from the API, a script, or a
+                scheduled run - where there was nobody to answer. Ask
+                the agent again in the chat and it will stop and wait
+                for you.
               </p>
             </div>
           )}

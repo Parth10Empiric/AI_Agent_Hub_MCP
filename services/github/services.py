@@ -22,13 +22,26 @@ class GitHubService:
     BASE_URL = "https://api.github.com"
     API_VERSION = "2022-11-28"
 
-    def __init__(self):
-        self.token = os.getenv("GITHUB_TOKEN")
+    def __init__(self, token: str | None = None):
+        """
+        PHASE 5.5: the token is now a PARAMETER, not a global.
+
+        Passed in, it is the calling user's own OAuth token, resolved
+        by the backend and delivered in the MCP request metadata.
+
+        Omitted, it falls back to .env - which keeps the CLI
+        (ai_client.py), test_github.py and the whole local development
+        loop working exactly as before. In production that fallback is
+        refused before this line is ever reached; see
+        core.tenancy.env_credentials_allowed.
+        """
+
+        self.token = token
 
         if not self.token:
             raise ValueError(
-                "GITHUB_TOKEN is missing. "
-                "Add it to your .env file."
+                "No GitHub credentials. Connect GitHub in Agent Hub, "
+                "or set GITHUB_TOKEN for local use."
             )
 
         self.headers = {

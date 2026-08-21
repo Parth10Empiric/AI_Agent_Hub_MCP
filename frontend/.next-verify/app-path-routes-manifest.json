@@ -1,0 +1,19 @@
+{
+  "/_not-found/page": "/_not-found",
+  "/favicon.ico/route": "/favicon.ico",
+  "/api/conversations/[id]/messages/stream/route": "/api/conversations/[id]/messages/stream",
+  "/page": "/",
+  "/(app)/agents/[id]/chat/page": "/agents/[id]/chat",
+  "/(app)/agents/[id]/page": "/agents/[id]",
+  "/(app)/agents/[id]/permissions/page": "/agents/[id]/permissions",
+  "/(app)/agents/new/page": "/agents/new",
+  "/(app)/agents/[id]/settings/page": "/agents/[id]/settings",
+  "/(app)/agents/page": "/agents",
+  "/(app)/executions/page": "/executions",
+  "/(app)/dashboard/page": "/dashboard",
+  "/(app)/plugins/[key]/page": "/plugins/[key]",
+  "/(app)/plugins/page": "/plugins",
+  "/(auth)/login/page": "/login",
+  "/(app)/security/page": "/security",
+  "/(auth)/register/page": "/register"
+}

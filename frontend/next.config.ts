@@ -48,6 +48,64 @@ const nextConfig: NextConfig = {
    * development and production behave identically - which is the whole
    * point.
    */
+  /**
+   * Security headers on the HTML responses (Phase 5.9).
+   *
+   * These belong HERE and not on FastAPI: a Content-Security-Policy on
+   * a JSON response protects nothing. It is the page that loads
+   * scripts, and the page is served by Next.
+   *
+   * CSP IS REPORT-ONLY, DELIBERATELY.
+   *
+   * An enforcing policy that is slightly wrong breaks the app silently
+   * in the browser and passes every server-side test - and the usual
+   * response to that is to delete the header rather than fix it.
+   * Report-Only sends the same violations to the console while
+   * blocking nothing. Watch it for a week, then rename the header.
+   *
+   * `unsafe-inline` for styles is required by Next's own injected
+   * styles; `unsafe-eval` is required by its dev mode only, which is
+   * why the policy differs between environments.
+   */
+  async headers() {
+    const dev = process.env.NODE_ENV !== "production";
+
+    const csp = [
+      "default-src 'self'",
+      `script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ""}`,
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: https:",
+      "font-src 'self' data:",
+      // The API is same-origin thanks to the rewrite below, so this
+      // does not need to name it.
+      "connect-src 'self'",
+      // Nothing in this app is ever framed, and nothing it shows
+      // should be embeddable - least of all the approval dialog.
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join("; ");
+
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "Content-Security-Policy-Report-Only", value: csp },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "X-Frame-Options", value: "DENY" },
+          {
+            key: "Referrer-Policy",
+            value: "strict-origin-when-cross-origin",
+          },
+          {
+            key: "Permissions-Policy",
+            value: "camera=(), microphone=(), geolocation=(), payment=()",
+          },
+        ],
+      },
+    ];
+  },
+
   async rewrites() {
     return {
       /**

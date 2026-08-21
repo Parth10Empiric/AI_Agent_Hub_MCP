@@ -4,13 +4,19 @@ from mcp.server import MCPServer
 
 from .errors import GoogleDriveError
 from .services import GoogleDriveService
+from core.tenancy import service_proxy
 from core.tool_utils import handle_tool_error
 
 
 def register_google_drive_tools(mcp: MCPServer) -> None:
     """Register all Google Drive tools with the MCP server."""
 
-    drive_service = GoogleDriveService()
+    # Per-request, resolved from the MCP request metadata. Every tool
+    # below still calls `drive_service.something(...)` unchanged.
+    drive_service = service_proxy(
+        "google_drive",
+        lambda token: GoogleDriveService(access_token=token),
+    )
 
     # ============================================================
     # FILE DISCOVERY

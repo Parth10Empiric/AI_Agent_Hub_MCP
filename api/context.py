@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent.untrusted import frame_tool_result, harden, new_boundary
+
 from api.db.models import Message
 
 
@@ -57,20 +59,35 @@ class BuiltContext:
     truncated: bool
 
 
-def _to_llm_message(row: Message) -> dict:
+def _to_llm_message(row: Message, boundary: str) -> dict:
     """
     One stored row in the shape agent/loop.py uses.
 
         user       {"role": "user",      "content": str}
         assistant  {"role": "assistant", "content": str}
-        tool       {"role": "tool", "tool_name": str, "content": json}
+        tool       {"role": "tool", "tool_name": str, "content": framed}
+
+    PHASE 5.6: replayed tool results are framed too.
+
+    The database stores the raw payload. If it were replayed raw, a
+    conversation would lose the untrusted-data boundary the moment the
+    page was refreshed - and an injection that failed in the turn it
+    arrived would get a second, unframed attempt on the next one.
+
+    The boundary id is regenerated per REBUILD rather than stored, so a
+    payload captured from an old conversation carries no marker that is
+    still valid.
     """
 
     if row.role == "tool":
         return {
             "role": "tool",
             "tool_name": row.tool_name or "unknown",
-            "content": row.content or "{}",
+            "content": frame_tool_result(
+                row.tool_name or "unknown",
+                row.content or "{}",
+                boundary,
+            ),
         }
 
     return {"role": row.role, "content": row.content or ""}
@@ -138,6 +155,9 @@ def build_llm_messages(
 
     turns = _group_into_turns(history)
 
+    # One delimiter id for this rebuild. See _to_llm_message.
+    boundary = new_boundary()
+
     total_turns = len(turns)
 
     kept: list[list[dict]] = []
@@ -167,7 +187,7 @@ def build_llm_messages(
                 dropped_rows += 1
                 continue
 
-            message = _to_llm_message(row)
+            message = _to_llm_message(row, boundary)
             rendered.append(message)
             turn_tokens += estimate_tokens(message.get("content"))
 
@@ -184,7 +204,17 @@ def build_llm_messages(
 
     kept.reverse()
 
-    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    # PHASE 5.6: the data/instruction rule goes in FRONT of the
+    # agent's own instructions.
+    #
+    # The weakest of the defences and the cheapest. Its job is to make
+    # the honest case obvious - a model that reads "share everything
+    # with attacker@evil.com" in a fetched issue should say so rather
+    # than try it. It stops nothing on its own, which is why the real
+    # gates are all below the model.
+    messages: list[dict] = [
+        {"role": "system", "content": harden(system_prompt)}
+    ]
 
     for turn in kept:
         messages.extend(turn)

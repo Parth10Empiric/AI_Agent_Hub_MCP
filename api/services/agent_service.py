@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent.engine import AgentEngine
 from agent.schemas import ToolDefinition
 
-from api.db.models import Agent, AgentTool
+from api.audit import AuditAction, ResourceType
+from api.db.models import Agent, AgentScope, AgentTool
+from api.approvals import may_auto_approve
+from api.scopes import default_scopes
+from api.services import audit_service
 from api.schemas.agent import (
     AgentCreate,
     AgentDetail,
@@ -232,6 +236,10 @@ def _default_rows(
                 else override.requires_approval
             )
 
+            # CRITICAL tools always ask, whatever the client sent.
+            if not may_auto_approve(tool):
+                requires_approval = True
+
         rows.append(
             {
                 "tool_name": tool.name,
@@ -295,6 +303,43 @@ async def create_agent(
     for row in _default_rows(tools, payload.tools):
         session.add(AgentTool(agent_id=agent.id, **row))
 
+    # PHASE 5.1: the coarse grants, seeded closed.
+    #
+    # One wildcard READ scope per service this agent draws tools from,
+    # and nothing else. The agent is immediately useful (it can look at
+    # things) and immediately harmless (it cannot change anything),
+    # which is the same direction _default_rows already takes for the
+    # per-tool checkboxes.
+    #
+    # A write scope is never seeded. "I clicked Create" is not consent
+    # to open issues on somebody's repository.
+    for scope in sorted(default_scopes(tools)):
+        session.add(
+            AgentScope(
+                agent_id=agent.id,
+                scope=scope,
+                granted_by=user_id,
+            )
+        )
+
+    # The audit trail starts at row one. Without this the history reads
+    # "nobody ever granted read access" - true of no agent, and the
+    # kind of gap that makes the whole log untrustworthy.
+    # Observational, but written in this transaction anyway: the agent
+    # and its first audit row are created together, and an agent whose
+    # history begins with "scope revoked" and no matching creation
+    # reads like tampering.
+    session.add(
+        audit_service.entry(
+            AuditAction.AGENT_CREATED,
+            user_id=user_id,
+            actor_user_id=user_id,
+            resource_type=ResourceType.AGENT,
+            resource_id=agent.id,
+            name=agent.name,
+        )
+    )
+
     await session.flush()
 
     return await get_agent(session, engine, user_id, agent.id)
@@ -331,6 +376,9 @@ async def set_tools(
     user_id: uuid.UUID,
     agent_id: uuid.UUID,
     tools: dict[str, AgentToolWrite],
+    *,
+    actor_user_id: uuid.UUID | None = None,
+    ip_address: str | None = None,
 ) -> AgentDetail:
     """
     Replace this agent's tool configuration.
@@ -361,7 +409,21 @@ async def set_tools(
             else setting.requires_approval
         )
 
+        # PHASE 5.2: "always allow" is never offered for a CRITICAL
+        # tool, and refusing it in the UI is not the same as refusing
+        # it. A request that asks for it is silently corrected rather
+        # than rejected - the rest of the payload is perfectly valid,
+        # and failing the whole call would leave the user unable to
+        # configure anything else.
+        if not may_auto_approve(definition):
+            requires_approval = True
+
         row = existing.get(name)
+
+        # What the agent could do BEFORE this request. A row that does
+        # not exist yet counts as disabled - creating it already
+        # enabled is a change worth recording.
+        was_enabled = row.enabled if row is not None else False
 
         if row is None:
             session.add(
@@ -377,6 +439,28 @@ async def set_tools(
         else:
             row.enabled = setting.enabled
             row.requires_approval = requires_approval
+
+        # PHASE 5.1: audit the CHANGE, not the request.
+        #
+        # A PUT sends the complete desired set, so most entries in it
+        # are unchanged. Logging all of them would bury the one line
+        # that matters - "github_merge_pull_request was enabled" -
+        # under sixty that say nothing happened.
+        if setting.enabled != was_enabled:
+            audit_service.record(
+                session,
+                (
+                    AuditAction.TOOL_ENABLED
+                    if setting.enabled
+                    else AuditAction.TOOL_DISABLED
+                ),
+                user_id=user_id,
+                actor_user_id=actor_user_id or user_id,
+                resource_type=ResourceType.AGENT,
+                resource_id=agent.id,
+                ip_address=ip_address,
+                tool_name=name,
+            )
 
     await session.flush()
 
@@ -399,6 +483,19 @@ async def archive_agent(
     agent = await _owned_agent(session, user_id, agent_id)
 
     agent.is_archived = True
+
+    # PHASE 5.8: archiving is a state change, so it commits with one.
+    # "The agent stopped answering" and "somebody archived it" are the
+    # same event, and only one of them was previously recorded.
+    audit_service.record(
+        session,
+        AuditAction.AGENT_ARCHIVED,
+        user_id=user_id,
+        actor_user_id=user_id,
+        resource_type=ResourceType.AGENT,
+        resource_id=agent.id,
+        name=agent.name,
+    )
 
     await session.flush()
 

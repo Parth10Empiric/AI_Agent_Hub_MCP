@@ -40,6 +40,22 @@ SCOPES = [
 ]
 
 
+def _interactive_auth_allowed() -> bool:
+    """
+    May this process open a browser to authenticate?
+
+    Only outside production. run_local_server() blocks on a consent
+    window on the SERVER, which in a web context means a shared MCP
+    subprocess hangs while holding the session lock.
+    """
+
+    import os
+
+    environment = os.getenv("MCP_ENVIRONMENT", "development")
+
+    return environment.strip().lower() != "production"
+
+
 class GoogleCalendarService:
     """
     Production-oriented Google Calendar API wrapper.
@@ -48,7 +64,17 @@ class GoogleCalendarService:
     MCP tools should not directly call Google APIs.
     """
 
-    def __init__(self):
+    def __init__(self, access_token: str | None = None):
+        """
+        PHASE 5.5: `access_token` is the calling user's own token.
+
+        Given one, this service never reads token.json and never opens
+        a browser - it builds Credentials directly. Omitted, the
+        file-based flow still runs, which is what the CLI and local
+        development use.
+        """
+
+        self._access_token = access_token
         self._service = None
 
     # =========================================================
@@ -56,6 +82,22 @@ class GoogleCalendarService:
     # =========================================================
 
     def _authenticate(self):
+
+        # PHASE 5.5: a token from the backend wins, and short circuits
+        # the whole file/browser flow below. It has already been
+        # refreshed by api/services/oauth_service.access_token, so
+        # there is nothing to refresh here - and two processes
+        # refreshing one Google credential would race, because Google
+        # invalidates the old refresh token when it issues a new one.
+        if self._access_token:
+            return Credentials(token=self._access_token, scopes=SCOPES)
+
+        if not _interactive_auth_allowed():
+            raise GoogleCalendarAuthError(
+                "No Google credentials for this request. Connect Google "
+                "Calendar in Agent Hub and try again."
+            )
+
         creds = None
 
         if TOKEN_FILE.exists():

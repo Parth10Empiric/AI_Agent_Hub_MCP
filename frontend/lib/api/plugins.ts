@@ -11,6 +11,7 @@ import { api } from "./client";
 import type {
   ConnectRequest,
   ConnectionRead,
+  OAuthStart,
   PluginDetail,
   PluginSummary,
 } from "../types";
@@ -41,4 +42,39 @@ export function disconnectPlugin(key: string): Promise<void> {
   return api<void>(`/api/plugins/${encodeURIComponent(key)}/connect`, {
     method: "DELETE",
   });
+}
+
+/**
+ * Begin an OAuth flow.
+ *
+ * Returns a URL rather than redirecting, and the caller navigates to
+ * it. That inversion exists because this endpoint is bearer
+ * authenticated and a browser NAVIGATION cannot send an Authorization
+ * header - so the app fetches the URL with a normal authenticated
+ * request first, then leaves.
+ *
+ * Use `window.location.href = authorize_url`, never fetch(): a consent
+ * screen is a page the user has to see and interact with, and no
+ * amount of XHR will make a provider render one inside your app.
+ */
+export function startOAuth(
+  key: string,
+  redirectTo?: string,
+): Promise<OAuthStart> {
+  const query = redirectTo
+    ? `?redirect_to=${encodeURIComponent(redirectTo)}`
+    : "";
+
+  return api<OAuthStart>(
+    `/api/plugins/${encodeURIComponent(key)}/oauth/start${query}`,
+    { method: "POST" },
+  );
+}
+
+/** Force a refresh. Normal operation refreshes before use, not here. */
+export function refreshConnection(key: string): Promise<ConnectionRead> {
+  return api<ConnectionRead>(
+    `/api/plugins/${encodeURIComponent(key)}/oauth/refresh`,
+    { method: "POST" },
+  );
 }

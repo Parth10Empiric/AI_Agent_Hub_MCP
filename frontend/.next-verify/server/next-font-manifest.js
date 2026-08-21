@@ -1,0 +1,1 @@
+self.__NEXT_FONT_MANIFEST='{"pages":{},"app":{"/home/empiric/Projects/personal-mcp-server/personal-mcp-server/frontend/app/layout":["static/media/22a5144ee8d83bca-s.p.woff2","static/media/7d4881bb7e1bf84d-s.p.woff2"]},"appUsingSizeAdjust":true,"pagesUsingSizeAdjust":false}';

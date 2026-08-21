@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { listMessages } from "@/lib/api/conversations";
+import type { PendingApprovalEvent } from "@/components/approvals/approval-request";
 import { streamTurn, type StreamEvent } from "./use-sse";
 import type {
   ApprovalRequired,
@@ -29,6 +30,10 @@ export type TurnPhase =
   | "routing"
   | "thinking"
   | "tools"
+  // The turn is SUSPENDED on the server, waiting for this user to
+  // approve or deny a tool call. Not "slow" - stopped, on purpose,
+  // until someone answers.
+  | "waiting"
   | "writing";
 
 export interface LiveTurn {
@@ -42,7 +47,19 @@ export interface LiveTurn {
   // human to confirm. Populated from the final `done` event, which
   // carries the whole ChatResponse.
   approvals: ApprovalRequired[];
+
+  // The call the agent has stopped on, if any. Present only while the
+  // turn is genuinely parked - `approval_resolved` clears it, and the
+  // stream then carries on with tool_start for the very call this
+  // answered.
+  pendingApproval: PendingApprovalEvent | null;
+
   error?: string;
+
+  // True when the turn stopped because of a rate limit rather than a
+  // fault. The UI words those two very differently, and conflating
+  // them sends people hunting for a bug that does not exist.
+  rateLimited?: boolean;
 }
 
 /**
@@ -99,6 +116,7 @@ export function useChat(conversationId: string) {
         answer: "",
         timeline: [],
         approvals: [],
+        pendingApproval: null,
       });
 
       try {
@@ -133,6 +151,10 @@ export function useChat(conversationId: string) {
       setLive(null);
 
       // Other screens showed counts derived from this turn.
+      // The meter must reflect the turn that just ran, or a user
+      // watching it count down sees a number that is always one
+      // behind - and stops trusting it exactly when it matters.
+      queryClient.invalidateQueries({ queryKey: ["limits"] });
       queryClient.invalidateQueries({ queryKey: ["executions"] });
       queryClient.invalidateQueries({ queryKey: ["execution-stats"] });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -234,6 +256,28 @@ function applyEvent(
         return { ...prev, phase: "thinking", timeline };
       }
 
+      case "approval_required":
+        // The turn has stopped. Nothing else will arrive on this
+        // stream until the approval is resolved or its timer runs
+        // out - which is exactly why the card carries its own
+        // countdown rather than a spinner.
+        return {
+          ...prev,
+          phase: "waiting",
+          pendingApproval: data as unknown as PendingApprovalEvent,
+        };
+
+      case "approval_resolved":
+        // Fires for approve, deny AND expiry, so this one case clears
+        // the card however the question was settled. The card itself
+        // has already shown the outcome; this is the server confirming
+        // it, and a resolution from ANOTHER tab arrives here too.
+        return {
+          ...prev,
+          phase: "thinking",
+          pendingApproval: null,
+        };
+
       case "answer_ready":
         return {
           ...prev,
@@ -250,14 +294,29 @@ function applyEvent(
           // The final event is the whole persisted ChatResponse, so
           // this is the first and only place the refused calls appear.
           approvals: (data.approvals_required as ApprovalRequired[]) ?? [],
+
+          // Whatever happened, nothing is waiting any more.
+          pendingApproval: null,
         };
 
-      case "error":
+      case "error": {
+        // A rate-limited turn is not a failure - nothing broke, the
+        // user has simply used their allowance. Saying "the agent turn
+        // failed" would send them looking for a bug that is not there.
+        const limited = data.code === "rate_limited";
+
         return {
           ...prev,
           phase: "idle",
-          error: String(data.detail ?? "The agent turn failed."),
+          error: String(
+            data.detail ??
+              (limited
+                ? "You have reached your limit for now."
+                : "The agent turn failed."),
+          ),
+          rateLimited: limited,
         };
+      }
 
       default:
         // An event this build does not know about - a newer backend,

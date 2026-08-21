@@ -42,3 +42,20 @@ next-env.d.ts
 
 # end-to-end test build output
 /.next-e2e
+
+# testing artifacts (Phase 5.9)
+#
+# Playwright traces are a full recording of every page snapshot and
+# every form fill - including the "Access token" field on the connect
+# dialog. Today the committed ones contain ghp_e2e_fake_token_value,
+# which is harmless. The day somebody runs the suite against a real
+# account to check something, the trace records the real value and
+# `git add .` puts it in history permanently.
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# build output from the e2e/verify runs
+/.next-verify/
+/.next-e2e/

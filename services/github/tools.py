@@ -1,9 +1,18 @@
 from mcp.server import MCPServer
 
+from core.tenancy import service_proxy
+
 from .services import GitHubService
 from .tool_helpers import github_tool
 
-github = GitHubService()
+
+# NOT a GitHubService any more - a proxy that resolves to whichever
+# instance belongs to the request being handled (Phase 5.5).
+#
+# Every tool below still writes `await github.something(...)` and none
+# of them changed. That is the whole point of the proxy: the name stays,
+# the object behind it stops being shared.
+github = service_proxy("github", lambda token: GitHubService(token=token))
 
     
 def register_github_tools(mcp: MCPServer):

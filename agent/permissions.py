@@ -192,7 +192,26 @@ class ApprovalHandler(Protocol):
     Async because the real implementations are: a web UI waiting on a
     websocket, a Slack confirmation button, a terminal prompt. All of
     them wait on a human, and a human is slow.
+
+    TWO METHODS, NOT ONE (Phase 5.2)
+
+        requires()   should we ask about this tool at all?
+        request()    ask, and wait for the answer.
+
+    The first used to live in the executor as a bare
+    `if tool.requires_approval:` - the value Phase 2 CLASSIFIED. That
+    made the per-agent setting in agent_tools.requires_approval
+    unreachable: a user could tick "always ask before this read" and be
+    ignored, or untick approval on a write and still be prompted.
+
+    Moving the question into the handler puts it where the agent's
+    configuration already is. The executor asks "does this need a
+    human?" instead of deciding for itself, and every implementation
+    below answers it the way it always did.
     """
+
+    def requires(self, tool: ToolDefinition) -> bool:
+        ...
 
     async def request(
         self,
@@ -208,6 +227,9 @@ class AutoApprove:
     """
 
     __slots__ = ()
+
+    def requires(self, tool: ToolDefinition) -> bool:
+        return False
 
     async def request(
         self,
@@ -238,13 +260,16 @@ class ConsoleApproval:
 
     __slots__ = ()
 
+    def requires(self, tool: ToolDefinition) -> bool:
+        return tool.requires_approval
+
     async def request(
         self,
         tool: ToolDefinition,
         arguments: dict,
     ) -> bool:
 
-        if not tool.requires_approval:
+        if not self.requires(tool):
             return True
 
         print("\n" + "-" * 52)
@@ -274,12 +299,78 @@ class DenyAll:
 
     __slots__ = ()
 
+    def requires(self, tool: ToolDefinition) -> bool:
+        return tool.requires_approval
+
     async def request(
         self,
         tool: ToolDefinition,
         arguments: dict,
     ) -> bool:
-        return not tool.requires_approval
+        return not self.requires(tool)
+
+
+# ---------------------------------------------------------------------
+# Budgets (Phase 5.7)
+# ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetDecision:
+    """
+    The answer to "is there budget left for this call?"
+
+    `retry_after` is in seconds, and it is the point: a refusal with no
+    idea when to come back either stops the user working or turns a
+    polite client into a hot loop.
+    """
+
+    allowed: bool
+    reason: str = ""
+    retry_after: int = 0
+
+
+@runtime_checkable
+class ToolBudget(Protocol):
+    """
+    Anything that can say "not so many, not so fast".
+
+    A THIRD seam beside PermissionPolicy and ApprovalHandler, because
+    it answers a third question:
+
+        policy     MAY this agent ever do this?      capability
+        approval   should we do THIS one, now?       consent
+        budget     how many, in the last hour?       volume
+
+    Volume is invisible to the other two. Each call in a mass
+    exfiltration looks exactly like the one the user asked for; only
+    the count gives it away.
+
+    Async, unlike PermissionPolicy, because the real implementation
+    will eventually ask Redis.
+    """
+
+    async def check(self, tool: ToolDefinition) -> BudgetDecision:
+        ...
+
+
+class NoBudget:
+    """
+    Unlimited. The default, and correct for the CLI.
+
+    A single operator running their own tools does not need protecting
+    from themselves - and a limit in a script is a limit that fires at
+    3am with nobody to see it.
+    """
+
+    __slots__ = ()
+
+    async def check(self, tool: ToolDefinition) -> BudgetDecision:
+        return BudgetDecision(allowed=True)
+
+
+def default_budget() -> ToolBudget:
+    return NoBudget()
 
 
 def default_policy() -> PermissionPolicy:
@@ -292,15 +383,19 @@ def default_approval() -> ApprovalHandler:
 
 __all__ = [
     "ApprovalHandler",
+    "BudgetDecision",
     "AutoApprove",
     "AllowAllPolicy",
     "ConsoleApproval",
     "DenyAll",
     "MaxRiskPolicy",
+    "NoBudget",
     "PermissionDecision",
     "PermissionPolicy",
     "ReadOnlyPolicy",
     "ScopePolicy",
+    "ToolBudget",
     "default_approval",
+    "default_budget",
     "default_policy",
 ]

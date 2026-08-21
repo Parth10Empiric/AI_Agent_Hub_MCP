@@ -69,6 +69,22 @@ export interface paths {
         /**
          * Login
          * @description Exchange credentials for a token pair.
+         *
+         *     RATE LIMITED ON TWO KEYS (Phase 5.7), and it needs both.
+         *
+         *         per IP       stops one machine grinding through a password
+         *                      list against many accounts
+         *
+         *         per ACCOUNT  stops a distributed attempt on ONE account, where
+         *                      every request comes from a different address
+         *
+         *     Neither alone is enough. And behind a proxy the IP is the proxy's,
+         *     so every user would share one bucket - which is exactly why the
+         *     account key is not optional.
+         *
+         *     Checked BEFORE the password is verified. Checking afterwards would
+         *     mean an attacker still gets an unlimited number of password
+         *     comparisons, and the limit would only slow down the response.
          */
         post: operations["login_api_auth_login_post"];
         delete?: never;
@@ -248,6 +264,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/plugins/{key}/oauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Oauth Start
+         * @description Begin connecting a service.
+         *
+         *     Returns the provider's consent URL for the client to navigate to.
+         *     See OAuthStart for why this is not a 302.
+         *
+         *     The `state` row written here is what makes the callback safe: it
+         *     proves the callback belongs to a flow WE started, it carries the
+         *     user's identity into a request that has no Authorization header,
+         *     and it can only be redeemed once.
+         */
+        post: operations["oauth_start_api_plugins__key__oauth_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plugins/{key}/oauth/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Oauth Refresh
+         * @description Force a token refresh now.
+         *
+         *     Normal operation never calls this - tokens are refreshed before use
+         *     (see oauth_service.access_token), which is the whole point of
+         *     storing expires_at. It exists so a user can prove a broken
+         *     connection is broken, and so an operator can reproduce a refresh
+         *     failure without waiting an hour for one.
+         */
+        post: operations["oauth_refresh_api_plugins__key__oauth_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents": {
         parameters: {
             query?: never;
@@ -311,13 +381,179 @@ export interface paths {
          * Set Tools
          * @description Set which tools this agent may use.
          *
-         *     This endpoint is where a user grants write access. Everything the
-         *     executor later allows traces back to a row written here - which is
-         *     why AgentToolPolicy denies by default: a tool that was never
-         *     granted here is a tool nobody consented to.
+         *     This endpoint is where a user switches individual tools on. It is
+         *     only HALF of the permission model: since Phase 5.1 a tool also
+         *     needs a scope granted through /agents/{id}/scopes, and both are
+         *     checked independently by DatabaseScopePolicy.
+         *
+         *     Ticking a write tool here therefore does NOT by itself give the
+         *     agent write access - which is the point. Two deliberate actions,
+         *     not one, stand between "create agent" and "may modify a client's
+         *     repository".
          */
         put: operations["set_tools_api_agents__agent_id__tools_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{agent_id}/scopes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Scopes
+         * @description What this agent is granted, and what it could be.
+         *
+         *     Both halves in one response so the UI never renders ticks from a
+         *     stale second request.
+         */
+        get: operations["list_scopes_api_agents__agent_id__scopes_get"];
+        put?: never;
+        /**
+         * Grant Scope
+         * @description Grant one scope.
+         *
+         *     Idempotent: granting twice changes nothing and writes no second
+         *     audit row, so a double-clicked button cannot produce a history that
+         *     reads like the user changed their mind.
+         */
+        post: operations["grant_scope_api_agents__agent_id__scopes_post"];
+        /**
+         * Revoke Scope
+         * @description Revoke one scope.
+         *
+         *     The scope travels as a QUERY parameter, not a path segment. Scope
+         *     strings contain ":" and "*", and proxies, routers and clients
+         *     disagree about escaping those inside a path - a rule that only
+         *     sometimes reaches the server is not a security control.
+         */
+        delete: operations["revoke_scope_api_agents__agent_id__scopes_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{agent_id}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Audit
+         * @description This agent's permission history, newest first.
+         *
+         *     Read-only by construction: no endpoint in this API updates or
+         *     deletes an audit row, and Phase 6 revokes UPDATE and DELETE on the
+         *     table at the database role level so the guarantee does not rest on
+         *     nobody ever writing one.
+         */
+        get: operations["list_audit_api_agents__agent_id__audit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Approvals
+         * @description The approvals inbox.
+         *
+         *     Defaults to pending, because that is the only list anyone opens
+         *     this page to see. `?status=` (empty) returns the full history.
+         */
+        get: operations["list_approvals_api_approvals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{approval_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Approval
+         * @description One approval, with the real arguments.
+         *
+         *     This is what the dialog renders. A user who has refreshed the page
+         *     or opened a second tab has lost the SSE frame that announced it,
+         *     and must still be able to see the question.
+         */
+        get: operations["get_approval_api_approvals__approval_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{approval_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve
+         * @description Say yes, and wake the waiting turn.
+         *
+         *     Approving is NOT the last word. The turn re-checks the agent's
+         *     scopes before it runs the tool, so a permission revoked while the
+         *     dialog was open still stops the call. This endpoint records consent;
+         *     it does not grant capability.
+         */
+        post: operations["approve_api_approvals__approval_id__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{approval_id}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deny
+         * @description Say no.
+         *
+         *     Explicit rather than "just let it expire". Denying wakes the turn
+         *     immediately, so the agent can tell the user it was refused instead
+         *     of sitting silent for five minutes.
+         */
+        post: operations["deny_api_approvals__approval_id__deny_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -460,6 +696,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Activity
+         * @description Everything this user has done, or that was done to their account.
+         *
+         *     Filtered by CATEGORY rather than by raw action, because "security"
+         *     is a word a user has; "scope.granted" is not.
+         */
+        get: operations["list_activity_api_audit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Limits
+         * @description This user's current usage.
+         *
+         *     `agent_id` is optional and adds the per-agent budgets. They are
+         *     per-AGENT because that is the unit a user configures and the unit
+         *     that gets compromised - so "which agent used them up?" has to have
+         *     an answer.
+         */
+        get: operations["get_limits_api_limits_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/conversations/{conversation_id}/messages/stream": {
         parameters: {
             query?: never;
@@ -579,6 +863,21 @@ export interface components {
             system_prompt: string;
             /** Tools */
             tools?: components["schemas"]["AgentToolRead"][];
+        };
+        /**
+         * AgentScopes
+         * @description GET /api/agents/{id}/scopes
+         *
+         *     Returns what IS granted and what COULD be, in one response. Two
+         *     endpoints would mean the UI renders the checkbox list from one
+         *     request and the ticks from another - and briefly shows the wrong
+         *     state whenever the second is slower.
+         */
+        AgentScopes: {
+            /** Granted */
+            granted?: components["schemas"]["ScopeRead"][];
+            /** Available */
+            available?: components["schemas"]["ScopeOption"][];
         };
         /**
          * AgentSummary
@@ -704,6 +1003,84 @@ export interface components {
             is_archived?: boolean | null;
         };
         /**
+         * ApprovalPage
+         * @description A cursor-paginated page of approvals.
+         */
+        ApprovalPage: {
+            /** Items */
+            items: components["schemas"]["ApprovalRead"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+        };
+        /**
+         * ApprovalRead
+         * @description One approval, as the dialog renders it.
+         *
+         *     `arguments` carries REAL VALUES (secrets redacted, long strings
+         *     truncated). That is the point of the whole screen: a user who reads
+         *
+         *         email: attacker@evil.com
+         *
+         *     clicks Cancel. A dialog showing only argument NAMES is a confirm
+         *     button that means nothing, and a user trained on meaningless
+         *     confirmations clicks through the one that mattered.
+         */
+        ApprovalRead: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Conversation Id
+             * Format: uuid
+             */
+            conversation_id: string;
+            /** Message Id */
+            message_id: string | null;
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Tool Name */
+            tool_name: string;
+            /** Operation */
+            operation: string;
+            /** Risk Level */
+            risk_level: string;
+            /** Arguments */
+            arguments?: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Resolved At */
+            resolved_at?: string | null;
+            /** Resolved By */
+            resolved_by?: string | null;
+            /**
+             * Seconds Remaining
+             * @default 0
+             */
+            seconds_remaining: number;
+        };
+        /**
          * ApprovalRequired
          * @description A call that was refused because nobody could confirm it.
          */
@@ -716,6 +1093,57 @@ export interface components {
             risk_level: string;
             /** Argument Keys */
             argument_keys?: string[];
+        };
+        /**
+         * AuditEntryRead
+         * @description One line of the user's own activity.
+         *
+         *     NOT the raw row. `label` is written for a person - "Granted
+         *     github:*:write" rather than "scope.granted" - because this screen
+         *     exists so a non-engineer can answer "did anything happen to my
+         *     account that I did not do?"
+         */
+        AuditEntryRead: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Action */
+            action: string;
+            /** Label */
+            label: string;
+            /** Category */
+            category: string;
+            /** Resource Type */
+            resource_type?: string | null;
+            /** Resource Id */
+            resource_id?: string | null;
+            /** Actor Ip */
+            actor_ip?: string | null;
+            /** Request Id */
+            request_id?: string | null;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /** AuditPage */
+        AuditPage: {
+            /** Items */
+            items: components["schemas"]["AuditEntryRead"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
         };
         /**
          * AuthResponse
@@ -1034,6 +1462,55 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /**
+         * LimitRead
+         * @description One budget, as the UI shows it.
+         *
+         *     `used` and `limit` rather than a percentage, because a percentage
+         *     hides the size of the thing: "80% used" means something very
+         *     different at 5 per hour and at 300.
+         */
+        LimitRead: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Description */
+            description: string;
+            /** Used */
+            used: number;
+            /** Limit */
+            limit: number;
+            /** Remaining */
+            remaining: number;
+            /**
+             * Resets In
+             * @default 0
+             */
+            resets_in: number;
+            /**
+             * Window Label
+             * @default hour
+             */
+            window_label: string;
+        };
+        /**
+         * LimitsRead
+         * @description GET /api/limits
+         *
+         *     Everything a user is currently spending against, in one response.
+         *     Two requests would mean the page renders half its meters from a
+         *     stale answer.
+         */
+        LimitsRead: {
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Limits */
+            limits?: components["schemas"]["LimitRead"][];
+        };
         /** LoginRequest */
         LoginRequest: {
             /**
@@ -1097,6 +1574,80 @@ export interface components {
             executions?: components["schemas"]["ExecutionRead"][];
         };
         /**
+         * OAuthStart
+         * @description Where to send the browser to begin an OAuth flow.
+         *
+         *     A URL IN A JSON BODY, not a 302.
+         *
+         *     This endpoint is bearer-authenticated, and a browser NAVIGATION
+         *     cannot carry an Authorization header. If it answered with a
+         *     redirect the frontend would have to navigate here directly - and
+         *     then it could not authenticate at all.
+         *
+         *     So the frontend fetches this with a normal authenticated request
+         *     and then sets window.location to `authorize_url`. One extra round
+         *     trip, and no second authentication mechanism to maintain.
+         */
+        OAuthStart: {
+            /** Authorize Url */
+            authorize_url: string;
+            /** Scopes */
+            scopes?: string[];
+        };
+        /**
+         * PermissionAuditPage
+         * @description A cursor-paginated page of audit entries.
+         *
+         *     Same shape as MessagePage rather than the generic Page[T], because
+         *     FastAPI generates a clearer OpenAPI schema from a named model than
+         *     from a parametrised generic - and the audit view is one a client's
+         *     security reviewer may well read straight from /docs.
+         */
+        PermissionAuditPage: {
+            /** Items */
+            items: components["schemas"]["PermissionAuditRead"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+        };
+        /**
+         * PermissionAuditRead
+         * @description One line of the agent's history.
+         *
+         *     Reads from AuditLog since Phase 5.8, where the trail widened from
+         *     permission changes to everything. `scope` and `tool_name` used to
+         *     be columns and are now keys in `metadata` - computed here so the
+         *     UI, which only ever wanted those two, did not have to change.
+         */
+        PermissionAuditRead: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Action */
+            action: string;
+            /** Actor User Id */
+            actor_user_id: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Scope */
+            scope?: string | null;
+            /** Tool Name */
+            tool_name?: string | null;
+            /** Ip Address */
+            ip_address?: string | null;
+            /** Request Id */
+            request_id?: string | null;
+        };
+        /**
          * PluginDetail
          * @description A service, plus its full tool list.
          */
@@ -1127,6 +1678,13 @@ export interface components {
             account_label?: string | null;
             /** Status */
             status?: string | null;
+            /**
+             * Oauth Available
+             * @default false
+             */
+            oauth_available: boolean;
+            /** Oauth Scopes */
+            oauth_scopes?: string[];
             /** Tools */
             tools: components["schemas"]["ToolSummary"][];
         };
@@ -1161,6 +1719,13 @@ export interface components {
             account_label?: string | null;
             /** Status */
             status?: string | null;
+            /**
+             * Oauth Available
+             * @default false
+             */
+            oauth_available: boolean;
+            /** Oauth Scopes */
+            oauth_scopes?: string[];
         };
         /**
          * RefreshRequest
@@ -1226,6 +1791,54 @@ export interface components {
             duration_ms: number;
             /** Unmatched Tokens */
             unmatched_tokens?: string[];
+        };
+        /**
+         * ScopeGrant
+         * @description POST body: the one scope to grant.
+         */
+        ScopeGrant: {
+            /** Scope */
+            scope: string;
+        };
+        /**
+         * ScopeOption
+         * @description A scope the user COULD grant, with enough context to decide.
+         *
+         *     Built from the live registry, never stored. `tool_count` is what
+         *     makes the choice legible: "github:*:write covers 7 tools" is a
+         *     sentence a user can weigh, where a bare scope string is not.
+         */
+        ScopeOption: {
+            /** Scope */
+            scope: string;
+            /** Service */
+            service: string;
+            /** Resource */
+            resource: string;
+            /** Action */
+            action: string;
+            /** Tool Count */
+            tool_count: number;
+            /**
+             * Granted
+             * @default false
+             */
+            granted: boolean;
+        };
+        /**
+         * ScopeRead
+         * @description One granted scope, as the UI shows it.
+         */
+        ScopeRead: {
+            /** Scope */
+            scope: string;
+            /**
+             * Granted At
+             * Format: date-time
+             */
+            granted_at: string;
+            /** Granted By */
+            granted_by: string | null;
         };
         /**
          * TokenPair
@@ -1642,6 +2255,70 @@ export interface operations {
             };
         };
     };
+    oauth_start_api_plugins__key__oauth_start_post: {
+        parameters: {
+            query?: {
+                redirect_to?: string | null;
+            };
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthStart"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    oauth_refresh_api_plugins__key__oauth_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_agents_api_agents_get: {
         parameters: {
             query?: {
@@ -1854,6 +2531,265 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_scopes_api_agents__agent_id__scopes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentScopes"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grant_scope_api_agents__agent_id__scopes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScopeGrant"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentScopes"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_scope_api_agents__agent_id__scopes_delete: {
+        parameters: {
+            query: {
+                scope: string;
+            };
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentScopes"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_audit_api_agents__agent_id__audit_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PermissionAuditPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_approvals_api_approvals_get: {
+        parameters: {
+            query?: {
+                status?: string | null;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_approval_api_approvals__approval_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                approval_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_api_approvals__approval_id__approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                approval_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deny_api_approvals__approval_id__deny_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                approval_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRead"];
                 };
             };
             /** @description Validation Error */
@@ -2153,6 +3089,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExecutionStats"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_activity_api_audit_get: {
+        parameters: {
+            query?: {
+                category?: string | null;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_limits_api_limits_get: {
+        parameters: {
+            query?: {
+                agent_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LimitsRead"];
                 };
             };
             /** @description Validation Error */

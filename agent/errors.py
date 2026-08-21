@@ -60,6 +60,15 @@ class ErrorCode(str, Enum):
     PERMISSION_DENIED = "permission_denied"
     APPROVAL_DENIED = "approval_denied"
 
+    # OUR limit, not the remote service's (Phase 5.7).
+    #
+    # Deliberately distinct from RATE_LIMITED, which is in
+    # ALWAYS_RETRYABLE because a 429 from GitHub means "I did not run
+    # this, try again". Our own budget is the opposite: retrying inside
+    # the same window cannot succeed, and retrying is exactly what the
+    # limit exists to prevent.
+    BUDGET_EXCEEDED = "budget_exceeded"
+
     # --- Transport: the message never completed a round trip --------
     CONNECTION_ERROR = "connection_error"
     TIMEOUT = "timeout"
@@ -187,6 +196,11 @@ RECOVERY_HINTS: dict[ErrorCode, str] = {
     ),
     ErrorCode.VALIDATION_ERROR: (
         "The service rejected the input. Correct it and try again."
+    ),
+    ErrorCode.BUDGET_EXCEEDED: (
+        "This agent has reached its hourly limit for this kind of "
+        "action. Tell the user plainly, say roughly when it resets, "
+        "and do not retry."
     ),
     ErrorCode.RATE_LIMITED: (
         "The service is rate limiting us. This was already retried. "

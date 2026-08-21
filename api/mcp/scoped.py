@@ -43,12 +43,13 @@ class ScopedSession:
     is a complete substitute.
     """
 
-    __slots__ = ("_provider", "_user_id")
+    __slots__ = ("_provider", "_user_id", "_resolver")
 
     def __init__(
         self,
         provider: MCPSessionProvider,
         user_id: str | None = None,
+        resolver: Any | None = None,
     ) -> None:
         self._provider = provider
 
@@ -56,14 +57,36 @@ class ScopedSession:
         # per-user credentials without this class changing.
         self._user_id = user_id
 
+        # PHASE 5.5. Answers "what does this user need for this call?"
+        # None means send nothing, which is what the CLI and the tests
+        # do - and why this change is invisible to them.
+        self._resolver = resolver
+
     async def call_tool(
         self,
         name: str,
         arguments: dict[str, Any] | None = None,
     ) -> Any:
 
+        # PHASE 5.5: the caller's own credentials, in the request
+        # METADATA - not in `arguments`.
+        #
+        # That distinction is the entire security property. Arguments
+        # are chosen by the model, echoed back in tool results, and
+        # stored on the ExecutionRecord. Metadata is part of the MCP
+        # envelope: the model never sees it and it is never persisted.
+        #
+        # Resolved INSIDE the lock-free part of the call, before the
+        # session is borrowed, so a slow credential refresh does not
+        # hold the shared MCP session while it happens.
+        meta = (
+            await self._resolver.meta_for(name)
+            if self._resolver is not None
+            else None
+        )
+
         async with self._provider.session(self._user_id) as session:
-            return await session.call_tool(name, arguments)
+            return await session.call_tool(name, arguments, meta=meta)
 
     async def list_tools(self) -> Any:
         async with self._provider.session(self._user_id) as session:

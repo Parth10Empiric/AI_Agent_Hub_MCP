@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -18,10 +19,42 @@ import {
 
 import { ConnectDialog } from "@/components/plugins/connect-dialog";
 import { disconnectPlugin, listConnections, listPlugins } from "@/lib/api/plugins";
+import { prettyNamespace } from "@/lib/tools";
 
 export default function PluginsPage() {
   const [connecting, setConnecting] = useState<string | null>(null);
   const queryClient = useQueryClient();
+
+  const router = useRouter();
+  const search = useSearchParams();
+
+  /**
+   * Report the result of an OAuth round trip.
+   *
+   * The user left this page, approved on the provider's site, and the
+   * backend redirected them back with ?connected= or ?error=. Without
+   * this they would return to a page that looks exactly as it did
+   * before and have no idea whether it worked.
+   *
+   * The query string is cleared afterwards, so a refresh - or a
+   * bookmark - does not replay a stale message.
+   */
+  useEffect(() => {
+    const connected = search.get("connected");
+    const failed = search.get("error");
+
+    if (!connected && !failed) return;
+
+    if (connected) {
+      toast.success(`${prettyNamespace(connected)} connected`);
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+    } else {
+      toast.error(OAUTH_ERRORS[failed ?? ""] ?? "Could not connect.");
+    }
+
+    router.replace("/plugins");
+  }, [search, router, queryClient]);
 
   const plugins = useQuery({ queryKey: ["plugins"], queryFn: listPlugins });
   const connections = useQuery({
@@ -152,8 +185,38 @@ export default function PluginsPage() {
           pluginKey={connecting}
           open={Boolean(connecting)}
           onOpenChange={(open) => !open && setConnecting(null)}
+          // Answered by the backend from its own configuration, so the
+          // OAuth button appears only where a client id and secret are
+          // actually set. A button that leads to a broken consent
+          // screen is worse than no button.
+          oauthAvailable={
+            plugins.data?.find((p) => p.key === connecting)
+              ?.oauth_available ?? false
+          }
+          oauthScopes={
+            plugins.data?.find((p) => p.key === connecting)
+              ?.oauth_scopes ?? []
+          }
         />
       )}
     </div>
   );
 }
+
+/**
+ * The callback's error codes, in words.
+ *
+ * `invalid_state` is the interesting one: it means the callback did
+ * not match a request this app started. Usually the user sat on the
+ * consent screen for more than ten minutes, or used a back button and
+ * replayed a link. It is also exactly what a forged callback looks
+ * like - which is the point of checking it - so the wording says what
+ * to do rather than accusing anyone.
+ */
+const OAUTH_ERRORS: Record<string, string> = {
+  invalid_state:
+    "That connection request expired or was already used. Try again.",
+  exchange_failed:
+    "The service refused the connection. Try again, or check the app's settings.",
+  access_denied: "You cancelled the connection. Nothing was changed.",
+};

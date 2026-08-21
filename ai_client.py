@@ -147,6 +147,44 @@ def print_timeline(turn: AgentTurn) -> None:
             print(f"    {record.tool_name}: {record.error.message}")
 
 
+def print_token_usage(turn: AgentTurn) -> None:
+    """
+    What one finished task cost in tokens.
+
+    Printed for EVERY turn, unlike the timeline - a turn with no tool
+    calls still spends tokens, and those are the cheap turns you want to
+    compare the expensive ones against.
+
+    Read it like this:
+
+      in   - everything the model had to read. Re-sent in full on every
+             round, so a 5-round turn pays for the system prompt, the
+             history AND every earlier tool result five times over. This
+             is the number that grows fastest, and trimming verbose tool
+             output is what shrinks it.
+      out  - what the model generated: its thinking, its tool calls and
+             the final answer.
+    """
+
+    print("\n" + "-" * 52)
+    print("Token usage")
+    print("-" * 52)
+
+    for round_number, prompt_tokens, eval_tokens in turn.token_rounds:
+        print(
+            f"  round {round_number:<3} "
+            f"in {prompt_tokens:>7,}   "
+            f"out {eval_tokens:>6,}"
+        )
+
+    print(
+        f"\n  TOTAL      in {turn.prompt_tokens:>7,}   "
+        f"out {turn.eval_tokens:>6,}   "
+        f"= {turn.total_tokens:,} tokens "
+        f"over {turn.rounds} round(s)"
+    )
+
+
 async def preflight_ollama() -> bool:
     """
     Verify the configured model actually answers before the REPL starts.
@@ -346,6 +384,8 @@ async def main() -> None:
                     continue
 
                 print_timeline(turn)
+
+                print_token_usage(turn)
 
                 print(f"\nAI: {turn.answer}")
 

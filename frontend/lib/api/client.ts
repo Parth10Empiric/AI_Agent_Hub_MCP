@@ -45,7 +45,22 @@ export class ApiError extends Error {
   readonly requestId: string | undefined;
   readonly details: Record<string, unknown> | undefined;
 
-  constructor(status: number, body: ApiErrorBody | null, fallback: string) {
+  /**
+   * Seconds to wait, from the Retry-After header on a 429.
+   *
+   * Carried on the error rather than left in the response, because by
+   * the time a component catches this the response is long gone - and
+   * "try again later" with no number is what turns a polite client
+   * into a hot loop.
+   */
+  readonly retryAfter: number | undefined;
+
+  constructor(
+    status: number,
+    body: ApiErrorBody | null,
+    fallback: string,
+    retryAfter?: number,
+  ) {
     super(pickMessage(body, fallback));
 
     this.name = "ApiError";
@@ -53,6 +68,12 @@ export class ApiError extends Error {
     this.code = body?.error?.code;
     this.requestId = body?.error?.request_id;
     this.details = body?.error?.details;
+    this.retryAfter = retryAfter;
+  }
+
+  /** True when the server refused because of a rate limit. */
+  get isRateLimited(): boolean {
+    return this.status === 429;
   }
 }
 
@@ -209,6 +230,7 @@ export async function api<T>(
       response.status,
       await readErrorBody(response),
       `Request failed with status ${response.status}`,
+      parseRetryAfter(response),
     );
   }
 
@@ -232,4 +254,31 @@ async function readErrorBody(
     // replace a useful HTTP status with a JSON parse error.
     return null;
   }
+}
+
+
+/**
+ * Retry-After, in seconds.
+ *
+ * The header is allowed to be either a number of seconds or an HTTP
+ * date. This API always sends seconds, but a proxy in front of it may
+ * not - and a NaN silently becoming "0 seconds" would tell the user to
+ * retry immediately, straight back into the limit.
+ */
+function parseRetryAfter(response: Response): number | undefined {
+  const raw = response.headers.get("retry-after");
+
+  if (!raw) return undefined;
+
+  const seconds = Number(raw);
+
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds);
+
+  const asDate = Date.parse(raw);
+
+  if (Number.isFinite(asDate)) {
+    return Math.max(0, Math.ceil((asDate - Date.now()) / 1000));
+  }
+
+  return undefined;
 }

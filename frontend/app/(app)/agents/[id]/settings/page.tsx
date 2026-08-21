@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 
 import { ToolPicker, type PickableTool } from "@/components/agents/tool-picker";
+import { UsageMeter } from "@/components/limits/usage-meter";
 import {
   archiveAgent,
   getAgentTools,
@@ -201,6 +202,22 @@ export default function AgentSettingsPage({
         </Button>
       </section>
 
+      <section className="space-y-3">
+        <h2 className="font-semibold">Permissions</h2>
+
+        <p className="text-sm text-muted-foreground">
+          Switching a tool on below is only half of it. A tool runs only
+          if it is also covered by a permission - so a write tool ticked
+          here still cannot write until you allow it.
+        </p>
+
+        <Button asChild variant="outline">
+          <Link href={`/agents/${id}/permissions`}>
+            Manage permissions
+          </Link>
+        </Button>
+      </section>
+
       <section className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="font-semibold">Tools</h2>
@@ -227,6 +244,14 @@ export default function AgentSettingsPage({
           selected={selected}
           onChange={setSelected}
         />
+      </section>
+
+      {/* The full meters live here rather than in the chat, where
+          only the tightest one appears. This is the page someone opens
+          when they want to know WHY, and it is next to the tool list
+          that explains what spends the budget. */}
+      <section className="border-t pt-6">
+        <UsageMeter agentId={id} />
       </section>
 
       <section className="space-y-3 border-t pt-6">

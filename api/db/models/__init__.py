@@ -13,17 +13,25 @@ Import a new model here the moment you create it.
 """
 
 from api.db.models.agent import Agent, AgentTool
+from api.db.models.approval import PendingApproval
+from api.db.models.audit import AuditLog
 from api.db.models.conversation import Conversation, Message
 from api.db.models.execution import ToolExecution
+from api.db.models.oauth import OAuthState
+from api.db.models.permission import AgentScope
 from api.db.models.plugin import PluginConnection
 from api.db.models.token import RefreshToken
 from api.db.models.user import User
 
 __all__ = [
     "Agent",
+    "AgentScope",
     "AgentTool",
+    "AuditLog",
     "Conversation",
     "Message",
+    "OAuthState",
+    "PendingApproval",
     "PluginConnection",
     "RefreshToken",
     "ToolExecution",

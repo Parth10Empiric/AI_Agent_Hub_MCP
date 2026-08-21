@@ -4,10 +4,17 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from api.deps import AgentEngineDep, CurrentUser, DbDep
+from api.deps import (
+    AgentEngineDep,
+    CredentialStoreDep,
+    CurrentUser,
+    DbDep,
+    RateLimiterDep,
+    SettingsDep,
+)
 from api.schemas.chat import ChatRequest, ChatResponse
 from api.services import chat_service
-from api.services.chat_service import AgentUnavailable
+from api.services.chat_service import AgentUnavailable, TurnLimitReached
 from api.services.conversation_service import ConversationNotFound
 
 
@@ -25,6 +32,9 @@ async def send_message(
     current_user: CurrentUser,
     session: DbDep,
     engine: AgentEngineDep,
+    settings: SettingsDep,
+    store: CredentialStoreDep,
+    limiter: RateLimiterDep,
 ) -> ChatResponse:
     """
     Send a message and run one complete agent turn.
@@ -60,12 +70,28 @@ async def send_message(
             user_id=current_user.id,
             conversation_id=conversation_id,
             content=payload.content,
+
+            # PHASE 5.5: tools run against THIS user's connected
+            # accounts, not the operator's .env.
+            settings=settings,
+            store=store,
+            limiter=limiter,
         )
 
     except ConversationNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conversation not found.",
+        ) from None
+
+    except TurnLimitReached as exc:
+        # 429 with a real Retry-After, not a bare "try later". The
+        # client can show a countdown, and a script can obey it -
+        # which is the difference between a limit and an annoyance.
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
         ) from None
 
     except AgentUnavailable as exc:

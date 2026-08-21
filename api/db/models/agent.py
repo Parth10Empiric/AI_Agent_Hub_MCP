@@ -10,6 +10,7 @@ from api.db.base import LAZY_RAISE, Base, TimestampMixin, UUIDMixin
 
 if TYPE_CHECKING:
     from api.db.models.conversation import Conversation
+    from api.db.models.permission import AgentScope
     from api.db.models.user import User
 
 
@@ -59,6 +60,20 @@ class Agent(UUIDMixin, TimestampMixin, Base):
     )
 
     tools: Mapped[list["AgentTool"]] = relationship(
+        back_populates="agent",
+        cascade="all, delete-orphan",
+        lazy=LAZY_RAISE,
+    )
+
+    # The coarse grants (Phase 5.1). Separate from `tools` because the
+    # two answer different questions:
+    #
+    #     tools    which tools has the user switched on?
+    #     scopes   what class of action may this agent take at all?
+    #
+    # Both are checked, independently, before any tool runs. See
+    # DatabaseScopePolicy in api/policies.py.
+    scopes: Mapped[list["AgentScope"]] = relationship(
         back_populates="agent",
         cascade="all, delete-orphan",
         lazy=LAZY_RAISE,

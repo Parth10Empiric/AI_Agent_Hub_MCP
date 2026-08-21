@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Integer,
     LargeBinary,
     String,
     UniqueConstraint,
@@ -66,6 +67,22 @@ class PluginConnection(UUIDMixin, TimestampMixin, Base):
     # cannot accidentally assign a plaintext str to a bytes column, so
     # the type system refuses the most likely mistake.
     credentials_enc: Mapped[bytes] = mapped_column(LargeBinary)
+
+    # WHICH key encrypted the bytes above (Phase 5.4).
+    #
+    # One column, written now, never read yet. That is the point: on
+    # the day the encryption key has to be rotated - because it leaked,
+    # or because a year passed - the job becomes "re-encrypt every row
+    # where key_version = 1, in the background, while the app keeps
+    # serving both". Without it, rotation means every stored credential
+    # becomes undecryptable at once and every user must reconnect.
+    #
+    # A column costs nothing today. Retrofitting it costs an outage.
+    key_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default="1",
+    )
 
     scopes: Mapped[list[str]] = mapped_column(
         ARRAY(String),

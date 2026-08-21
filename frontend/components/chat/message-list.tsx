@@ -7,6 +7,7 @@ import {
   refusedFromApprovals,
   refusedFromExecutions,
 } from "./approval-notice";
+import { ApprovalRequest } from "@/components/approvals/approval-request";
 import { Markdown } from "./markdown";
 import { ToolTimeline } from "./tool-timeline";
 import type { LiveTurn } from "@/lib/hooks/use-chat";
@@ -24,9 +25,14 @@ import type { MessageRead } from "@/lib/types";
 export function MessageList({
   history,
   live,
+  agentId,
 }: {
   history: MessageRead[];
   live: LiveTurn | null;
+
+  // Only so a refusal can link to the screen that fixes it. The list
+  // itself does not care which agent is talking.
+  agentId?: string;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -53,6 +59,7 @@ export function MessageList({
           {message.role === "assistant" && (
             <ApprovalNotice
               approvals={refusedFromExecutions(message.executions)}
+              agentId={agentId}
             />
           )}
 
@@ -83,7 +90,18 @@ export function MessageList({
           <Turn role="assistant">
             <ToolTimeline rows={live.timeline} />
 
-            <ApprovalNotice approvals={refusedFromApprovals(live.approvals)} />
+            {/* The turn is parked on this one. Rendered BELOW the
+                timeline so the sequence reads in the order it
+                happened: here is what I have done, here is what I
+                want to do next. */}
+            {live.pendingApproval && (
+              <ApprovalRequest approval={live.pendingApproval} />
+            )}
+
+            <ApprovalNotice
+              approvals={refusedFromApprovals(live.approvals)}
+              agentId={agentId}
+            />
 
             {live.answer ? (
               <Bubble role="assistant">{live.answer}</Bubble>
@@ -91,14 +109,27 @@ export function MessageList({
               <StatusLine live={live} />
             )}
 
-            {live.error && (
-              <p
-                role="alert"
-                className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
-              >
-                {live.error}
-              </p>
-            )}
+            {live.error &&
+              (live.rateLimited ? (
+                /* AMBER, not red, and worded as a fact rather than a
+                   failure. Nothing broke: the user has used their
+                   allowance, and a red "error" box sends them looking
+                   for a bug that does not exist. */
+                <p
+                  role="status"
+                  data-testid="rate-limit-notice"
+                  className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+                >
+                  {live.error}
+                </p>
+              ) : (
+                <p
+                  role="alert"
+                  className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+                >
+                  {live.error}
+                </p>
+              ))}
           </Turn>
         </>
       )}
@@ -125,6 +156,12 @@ function StatusLine({ live }: { live: LiveTurn }) {
         const service = live.routing?.services?.[0];
         return service ? `Searching ${service}...` : "Using tools...";
       }
+
+      case "waiting":
+        // Never "Thinking...". The agent is not thinking, it is
+        // stopped and waiting for this person - and telling them it is
+        // busy is how a request sits unanswered until it expires.
+        return "Waiting for your approval...";
 
       case "writing":
         return "Writing the answer...";

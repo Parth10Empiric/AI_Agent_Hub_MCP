@@ -12,6 +12,7 @@ from config.settings import settings
 from .errors import ErrorCode
 from .execution import ExecutionRecord
 from .executor import ToolExecutor
+from .untrusted import frame_tool_result, new_boundary
 
 """
 The agent loop (Phase 2.9).
@@ -131,6 +132,31 @@ class AgentTurn:
     # useful signal for tuning the lexicon.
     escalations: int = 0
 
+    # --- Token accounting -------------------------------------------
+    #
+    # Ollama reports token counts PER RESPONSE, and one user task is
+    # usually several responses (one per tool round). So these are
+    # summed across the turn rather than read off the final response,
+    # which would report only the last round and wildly undercount a
+    # 5-round turn.
+    #
+    # prompt_tokens : tokens the model READ   (system + history + tool
+    #                 results). Grows every round, because each round
+    #                 re-sends the whole conversation - this is why a
+    #                 chatty tool result is expensive twice over.
+    # eval_tokens   : tokens the model WROTE  (thinking, tool calls,
+    #                 final answer).
+    prompt_tokens: int = 0
+    eval_tokens: int = 0
+
+    # Per-round breakdown: [(round, prompt, eval), ...].
+    # Useful for spotting WHICH round blew up the context.
+    token_rounds: list[tuple[int, int, int]] = field(default_factory=list)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.eval_tokens
+
     @property
     def failed_executions(self) -> list[ExecutionRecord]:
         return [
@@ -245,6 +271,9 @@ def _done_payload(turn: AgentTurn) -> dict:
         "executions": len(turn.executions),
         "failed": len(turn.failed_executions),
         "total_tool_ms": round(turn.total_tool_ms, 2),
+        "prompt_tokens": turn.prompt_tokens,
+        "eval_tokens": turn.eval_tokens,
+        "total_tokens": turn.total_tokens,
     }
 
 
@@ -301,6 +330,15 @@ async def run_agent(
 
     tool_call_counts: Counter[str] = Counter()
 
+    # PHASE 5.6: the delimiter id for THIS turn.
+    #
+    # Every tool result is wrapped in a block tagged with it, so
+    # content fetched from a GitHub issue or a Drive file cannot forge
+    # a closing marker and have the rest of itself read as
+    # conversation. It cannot know a value generated after it was
+    # written.
+    boundary = new_boundary()
+
     escalations = 0
 
     turn = AgentTurn(answer="")
@@ -345,6 +383,40 @@ async def run_agent(
             messages=messages,
             tools=ollama_tools,
             think=True,
+        )
+
+        # `or 0`, not just a getattr default.
+        #
+        # These fields exist on the response object but are None when
+        # Ollama serves a request from its prompt cache - and `int +=
+        # None` raises TypeError, which would kill a turn over a
+        # statistic nobody asked to be load-bearing.
+        round_prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
+        round_eval_tokens = getattr(response, "eval_count", 0) or 0
+
+        turn.prompt_tokens += round_prompt_tokens
+        turn.eval_tokens += round_eval_tokens
+
+        turn.token_rounds.append(
+            (round_number, round_prompt_tokens, round_eval_tokens)
+        )
+
+        if verbose:
+            print(
+                f"  TOKENS round {round_number}: "
+                f"in {round_prompt_tokens:,}  "
+                f"out {round_eval_tokens:,}  "
+                f"(turn so far {turn.total_tokens:,})"
+            )
+
+        emit(
+            "tokens",
+            {
+                "round": round_number,
+                "prompt_tokens": round_prompt_tokens,
+                "eval_tokens": round_eval_tokens,
+                "turn_total": turn.total_tokens,
+            },
         )
 
         messages.append(response.message)
@@ -400,7 +472,11 @@ async def run_agent(
                     {
                         "role": "tool",
                         "tool_name": tool_name,
-                        "content": json.dumps(
+                        # Framed like any other tool message. This one
+                        # is ours, not a service's - but a message that
+                        # looks different is a message worth imitating.
+                        "content": frame_tool_result(
+                            tool_name,
                             {
                                 "success": False,
                                 "error": {
@@ -416,7 +492,8 @@ async def run_agent(
                                         "the user with what you have."
                                     ),
                                 },
-                            }
+                            },
+                            boundary,
                         ),
                     }
                 )
@@ -461,10 +538,26 @@ async def run_agent(
                 {
                     "role": "tool",
                     "tool_name": tool_name,
-                    "content": json.dumps(
+
+                    # PHASE 5.6: the untrusted-data boundary.
+                    #
+                    # THIS is the line that carries a GitHub issue body
+                    # into the model's context. Whatever a stranger
+                    # wrote in it arrives here verbatim - nothing is
+                    # filtered, because filtering text for "ignore
+                    # previous instructions" catches the phrase and not
+                    # the idea.
+                    #
+                    # What changes is the STRUCTURE around it: a
+                    # delimited block that says where the data came
+                    # from and that it is data. Defence in depth, not a
+                    # control - the controls are the agent's scopes,
+                    # the tool switch and the human approval, none of
+                    # which the model can talk its way past.
+                    "content": frame_tool_result(
+                        tool_name,
                         record.to_payload(),
-                        ensure_ascii=False,
-                        default=str,
+                        boundary,
                     ),
                 }
             )

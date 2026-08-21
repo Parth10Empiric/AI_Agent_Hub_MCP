@@ -10,10 +10,17 @@ from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
 
 from api.db.models import Conversation
-from api.deps import AgentEngineDep, CurrentUser, DbDep
+from api.deps import (
+    AgentEngineDep,
+    ApprovalNotifierDep,
+    CredentialStoreDep,
+    CurrentUser,
+    DbDep,
+    RateLimiterDep,
+)
 from api.schemas.chat import ChatRequest
 from api.services import chat_service
-from api.services.chat_service import AgentUnavailable
+from api.services.chat_service import AgentUnavailable, TurnLimitReached
 from api.services.conversation_service import ConversationNotFound
 from core.logging import get_logger
 
@@ -36,6 +43,9 @@ async def stream_message(
     current_user: CurrentUser,
     session: DbDep,
     engine: AgentEngineDep,
+    notifier: ApprovalNotifierDep,
+    store: CredentialStoreDep,
+    limiter: RateLimiterDep,
 ) -> EventSourceResponse:
     """
     Run one agent turn and stream its progress as Server-Sent Events.
@@ -100,6 +110,7 @@ async def stream_message(
         )
 
     sessionmaker = request.app.state.sessionmaker
+    settings = request.app.state.settings
     user_id = current_user.id
     content = payload.content
 
@@ -156,6 +167,20 @@ async def stream_message(
                         conversation_id=conversation_id,
                         content=content,
                         on_event=on_event,
+
+                        # PHASE 5.2. Passing the notifier is what turns
+                        # "deny anything needing approval" into "stop,
+                        # ask the browser, and carry on when they
+                        # answer". Only this endpoint may do it: it is
+                        # the only one that can hold a connection open
+                        # while a human reads a dialog.
+                        notifier=notifier,
+                        approval_timeout=settings.approval_timeout_seconds,
+
+                        # PHASE 5.5: the caller's own credentials.
+                        settings=settings,
+                        store=store,
+                        limiter=limiter,
                     )
 
                     await db.commit()
@@ -167,6 +192,22 @@ async def stream_message(
                 except Exception:
                     await db.rollback()
                     raise
+
+        except TurnLimitReached as exc:
+            # Reported as an EVENT, not a status code: the response is
+            # already a 200 text/event-stream by the time the turn
+            # runs. The code and retry_after are what let the UI show
+            # the same countdown it would for a real 429.
+            queue.put_nowait(
+                (
+                    "error",
+                    {
+                        "detail": str(exc),
+                        "code": "rate_limited",
+                        "retry_after": exc.retry_after,
+                    },
+                )
+            )
 
         except AgentUnavailable as exc:
             queue.put_nowait(("error", {"detail": str(exc), "code": "conflict"}))
@@ -222,7 +263,16 @@ async def stream_message(
             # closing a tab must not leave a half-recorded turn.
             if not task.done():
                 try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=120)
+                    # Long enough to outlast an approval wait plus the
+                    # tool call it authorises. A turn parked on a
+                    # human is the most likely reason a task is still
+                    # running here, and cutting it off at two minutes
+                    # would abandon it halfway through recording what
+                    # it did.
+                    await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=settings.approval_timeout_seconds + 120,
+                    )
 
                 except (TimeoutError, asyncio.CancelledError):
                     logger.warning("SSE turn still running after disconnect")

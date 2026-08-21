@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
 from api.deps import AgentEngineDep, CurrentUser, DbDep
 from api.schemas.agent import (
@@ -150,6 +150,7 @@ async def get_tools(
 async def set_tools(
     agent_id: uuid.UUID,
     payload: AgentToolsUpdate,
+    request: Request,
     current_user: CurrentUser,
     session: DbDep,
     engine: AgentEngineDep,
@@ -157,15 +158,28 @@ async def set_tools(
     """
     Set which tools this agent may use.
 
-    This endpoint is where a user grants write access. Everything the
-    executor later allows traces back to a row written here - which is
-    why AgentToolPolicy denies by default: a tool that was never
-    granted here is a tool nobody consented to.
+    This endpoint is where a user switches individual tools on. It is
+    only HALF of the permission model: since Phase 5.1 a tool also
+    needs a scope granted through /agents/{id}/scopes, and both are
+    checked independently by DatabaseScopePolicy.
+
+    Ticking a write tool here therefore does NOT by itself give the
+    agent write access - which is the point. Two deliberate actions,
+    not one, stand between "create agent" and "may modify a client's
+    repository".
     """
 
     try:
         return await agent_service.set_tools(
-            session, engine, current_user.id, agent_id, payload.tools
+            session,
+            engine,
+            current_user.id,
+            agent_id,
+            payload.tools,
+            # Phase 5.1: enabling a tool is a permission change, so it
+            # is audited with who did it and from where.
+            actor_user_id=current_user.id,
+            ip_address=request.client.host if request.client else None,
         )
 
     except AgentNotFound:

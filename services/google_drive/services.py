@@ -29,6 +29,28 @@ from .schemas import (
     GoogleDriveSearchResult,
 )
 
+def _interactive_auth_allowed() -> bool:
+    """
+    May this process open a browser to authenticate?
+
+    Only outside production, and never when the caller supplied a
+    token. run_local_server() opens a consent window ON THE MACHINE
+    RUNNING THE CODE and blocks until somebody clicks it - which on a
+    server means a shared subprocess hangs, holding the MCP lock, until
+    it times out.
+
+    That is not hypothetical here: the comment in __init__ records a
+    21.9-second Drive call caused by exactly this path being reached
+    when a token file could not be found.
+    """
+
+    import os
+
+    environment = os.getenv("MCP_ENVIRONMENT", "development")
+
+    return environment.strip().lower() != "production"
+
+
 class GoogleDriveService:
     """Service layer for interacting with Google Drive."""
 
@@ -38,7 +60,17 @@ class GoogleDriveService:
         self,
         credentials_path: str | None = None,
         token_path: str | None = None,
+        access_token: str | None = None,
     ) -> None:
+        """
+        PHASE 5.5: `access_token` is the calling user's own token.
+
+        Given one, this service never touches credentials.json,
+        token.json, or a browser - it builds Credentials directly and
+        talks to Drive as that user. Omitted, it falls back to the
+        file-based flow, which is what the CLI and local development
+        still use.
+        """
         # Absolute paths from config, not bare relative strings.
         #
         # These used to default to "credentials.json" and "token.json",
@@ -61,12 +93,33 @@ class GoogleDriveService:
             token_path or settings.google_token_path
         )
 
+        self._access_token = access_token
+
         self._credentials: Credentials | None = None
         self._service: Resource | None = None
 
     def _authenticate(self) -> Credentials:
         """Authenticate the user with Google OAuth."""
-        
+
+        # PHASE 5.5: a token supplied by the backend wins, and short
+        # circuits everything below.
+        #
+        # No file is read, no file is written and no browser is opened.
+        # The token was already refreshed by the backend before this
+        # call (api/services/oauth_service.access_token), so there is
+        # nothing to refresh here either - which is deliberate: two
+        # processes refreshing the same Google credential would race,
+        # and Google invalidates the old refresh token when it issues a
+        # new one.
+        if self._access_token:
+            return Credentials(token=self._access_token, scopes=self.SCOPES)
+
+        if not _interactive_auth_allowed():
+            raise GoogleDriveAuthenticationError(
+                "No Google credentials for this request. Connect Google "
+                "Drive in Agent Hub and try again."
+            )
+
         try:
 
             credentials = None

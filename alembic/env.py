@@ -12,6 +12,7 @@ Two changes from the generated template, both necessary:
 """
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -47,9 +48,23 @@ target_metadata = Base.metadata
 # a bare "%" starts an interpolation token. A percent-encoded character
 # in the password (e.g. "%40" for "@") would otherwise raise
 # ValueError: invalid interpolation syntax before a query ever runs.
+#
+# ALEMBIC_DATABASE_URL wins when it is set (Phase 5.8).
+#
+# Once the roles are split (scripts/setup_db_roles.py) the application
+# connects as `agenthub_app`, which deliberately cannot DELETE from
+# audit_log and does not own the schema. Migrations need the OWNER, so
+# they get their own URL.
+#
+# Set ALEMBIC_DATABASE_URL *before* switching DATABASE_URL to the app
+# role, or migrations start failing with permission errors that look
+# like a broken migration.
 config.set_main_option(
     "sqlalchemy.url",
-    get_settings().database_url.replace("%", "%%"),
+    (
+        os.getenv("ALEMBIC_DATABASE_URL")
+        or get_settings().database_url
+    ).replace("%", "%%"),
 )
 
 

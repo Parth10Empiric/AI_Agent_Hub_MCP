@@ -12,7 +12,11 @@ from agent.schemas import ToolDefinition
 
 from api.credentials import CredentialStore
 from api.db.models import PluginConnection
+from api.audit import AuditAction, ResourceType
+from api.oauth import build_provider, supports_oauth
+from api.settings import APISettings
 from api.plugin_meta import presentation_for
+from api.services import audit_service
 from api.schemas.plugin import (
     ConnectionRead,
     PluginDetail,
@@ -58,9 +62,21 @@ def _summary(
     key: str,
     tools: list[ToolDefinition],
     connection: PluginConnection | None,
+    settings: APISettings | None = None,
 ) -> PluginSummary:
 
     meta = presentation_for(key)
+
+    # Optional so every existing caller keeps working. When settings
+    # are not passed the answer is "no OAuth", which is the safe way
+    # round: the UI falls back to the token dialog rather than offering
+    # a flow that may not be configured.
+    oauth_available = bool(settings) and supports_oauth(settings, key)
+
+    scopes: list[str] = []
+
+    if oauth_available and settings is not None:
+        scopes = list(build_provider(settings, key).scopes)
 
     return PluginSummary(
         key=key,
@@ -77,6 +93,8 @@ def _summary(
         connected=connection is not None,
         account_label=connection.account_label if connection else None,
         status=connection.status if connection else None,
+        oauth_available=oauth_available,
+        oauth_scopes=scopes,
     )
 
 
@@ -84,6 +102,7 @@ async def list_catalogue(
     session: AsyncSession,
     engine: AgentEngine,
     user_id: uuid.UUID,
+    settings: APISettings | None = None,
 ) -> list[PluginSummary]:
     """
     Every service the MCP server currently exposes, marked with whether
@@ -101,7 +120,12 @@ async def list_catalogue(
     }
 
     return [
-        _summary(key, engine.registry.by_namespace(key), connections.get(key))
+        _summary(
+            key,
+            engine.registry.by_namespace(key),
+            connections.get(key),
+            settings,
+        )
         for key in engine.registry.servers()
     ]
 
@@ -111,6 +135,7 @@ async def get_plugin(
     engine: AgentEngine,
     user_id: uuid.UUID,
     key: str,
+    settings: APISettings | None = None,
 ) -> PluginDetail:
 
     tools = engine.registry.by_namespace(key)
@@ -123,7 +148,7 @@ async def get_plugin(
 
     connection = await _connection(session, user_id, key)
 
-    base = _summary(key, tools, connection)
+    base = _summary(key, tools, connection, settings)
 
     return PluginDetail(
         **base.model_dump(),
@@ -223,11 +248,35 @@ async def connect(
         session.add(connection)
 
     connection.credentials_enc = blob
+
+    # Stamped from the store, never hardcoded. A row that says
+    # key_version = 1 while the store is on version 2 is a row the
+    # rotation job still has to visit - and that comparison is the
+    # whole mechanism.
+    connection.key_version = store.version
+
     connection.account_label = account_label
     connection.scopes = list(scopes or [])
     connection.status = "connected"
     connection.connected_at = now
     connection.expires_at = None
+
+    # Transactional: connecting a service IS the state change, and a
+    # connection whose audit row is missing is a credential nobody can
+    # account for.
+    #
+    # The KEY, never the credential. This table is append-only and kept
+    # for a year.
+    audit_service.record(
+        session,
+        AuditAction.PLUGIN_CONNECTED,
+        user_id=user_id,
+        actor_user_id=user_id,
+        resource_type=ResourceType.PLUGIN,
+        plugin=key,
+        method="token",
+        account=account_label,
+    )
 
     await session.flush()
 
@@ -253,6 +302,18 @@ async def disconnect(
         return False
 
     await session.delete(connection)
+
+    # The credential row is gone; the record that it existed is not.
+    # "When did this account stop being connected?" has to remain
+    # answerable after the thing it asks about was deleted.
+    audit_service.record(
+        session,
+        AuditAction.PLUGIN_DISCONNECTED,
+        user_id=user_id,
+        actor_user_id=user_id,
+        resource_type=ResourceType.PLUGIN,
+        plugin=key,
+    )
 
     return True
 
@@ -282,3 +343,25 @@ async def get_credential(
     connection.last_used_at = datetime.now(timezone.utc)
 
     return payload.get("credential")
+
+
+async def get_connection(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    key: str,
+) -> ConnectionRead | None:
+    """
+    One connection, as the API describes it. Never the credential.
+
+    ConnectionRead has no field for credentials_enc, so there is no
+    path from this function to a token in an HTTP response - the shape
+    of the response model is the guarantee, not a rule someone has to
+    remember.
+    """
+
+    connection = await _connection(session, user_id, key)
+
+    if connection is None:
+        return None
+
+    return ConnectionRead.model_validate(connection)

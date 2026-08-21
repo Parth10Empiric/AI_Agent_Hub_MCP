@@ -14,6 +14,7 @@ const NAV = [
   { href: "/plugins", label: "Plugins" },
   { href: "/agents", label: "Agents" },
   { href: "/executions", label: "Executions" },
+  { href: "/security", label: "Security" },
 ];
 
 /**

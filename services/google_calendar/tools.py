@@ -1,11 +1,17 @@
 from mcp.server import MCPServer
 
+from core.tenancy import service_proxy
+
 from .schemas import event_input_schema
 from .services import GoogleCalendarService
 from .tool_helper import handle_calendar_errors
 
 
-calendar_service = GoogleCalendarService()
+# Per-request, not per-process. Every tool below is unchanged.
+calendar_service = service_proxy(
+    "google_calendar",
+    lambda token: GoogleCalendarService(access_token=token),
+)
 
 
 def register_google_calendar_tools(

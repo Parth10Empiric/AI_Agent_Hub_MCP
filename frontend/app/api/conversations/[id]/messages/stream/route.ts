@@ -33,6 +33,23 @@ const API_ORIGIN =
 // per-request stream.
 export const dynamic = "force-dynamic";
 
+/**
+ * How long one turn may hold this route open.
+ *
+ * A turn is normally 5-30 seconds. Since Phase 5.2 it can also STOP
+ * and wait for a human to approve a tool call - up to the backend's
+ * APPROVAL_TIMEOUT_SECONDS, five minutes by default. If the platform
+ * cuts the connection first, the browser sees the stream end while the
+ * server keeps waiting, and the approval prompt vanishes from a page
+ * that is still, on the server, blocking on it.
+ *
+ * 360 = the approval window plus a minute for the tool call it
+ * authorises. Ignored by `next start` on a normal server, honoured by
+ * platforms that impose a function timeout - which is exactly where
+ * this would otherwise break.
+ */
+export const maxDuration = 360;
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },

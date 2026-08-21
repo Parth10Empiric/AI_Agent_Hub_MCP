@@ -1,0 +1,19 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/favicon.ico/route": "app/favicon.ico/route.js",
+  "/api/conversations/[id]/messages/stream/route": "app/api/conversations/[id]/messages/stream/route.js",
+  "/page": "app/page.js",
+  "/(app)/agents/[id]/chat/page": "app/(app)/agents/[id]/chat/page.js",
+  "/(app)/agents/[id]/page": "app/(app)/agents/[id]/page.js",
+  "/(app)/agents/[id]/permissions/page": "app/(app)/agents/[id]/permissions/page.js",
+  "/(app)/agents/new/page": "app/(app)/agents/new/page.js",
+  "/(app)/agents/[id]/settings/page": "app/(app)/agents/[id]/settings/page.js",
+  "/(app)/agents/page": "app/(app)/agents/page.js",
+  "/(app)/executions/page": "app/(app)/executions/page.js",
+  "/(app)/dashboard/page": "app/(app)/dashboard/page.js",
+  "/(app)/plugins/[key]/page": "app/(app)/plugins/[key]/page.js",
+  "/(app)/plugins/page": "app/(app)/plugins/page.js",
+  "/(auth)/login/page": "app/(auth)/login/page.js",
+  "/(app)/security/page": "app/(app)/security/page.js",
+  "/(auth)/register/page": "app/(auth)/register/page.js"
+}

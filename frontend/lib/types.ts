@@ -56,6 +56,58 @@ export type ExecutionRead = Schemas["ExecutionRead"];
 export type RoutingSummary = Schemas["RoutingSummary"];
 export type ApprovalRequired = Schemas["ApprovalRequired"];
 
+// --- Permissions (Phase 5.1) ----------------------------------------
+
+export type ScopeRead = Schemas["ScopeRead"];
+export type ScopeOption = Schemas["ScopeOption"];
+export type AgentScopes = Schemas["AgentScopes"];
+export type ScopeGrant = Schemas["ScopeGrant"];
+export type PermissionAuditRead = Schemas["PermissionAuditRead"];
+export type PermissionAuditPage = Schemas["PermissionAuditPage"];
+
+// --- Approvals (Phase 5.2) ------------------------------------------
+
+export type ApprovalRead = Schemas["ApprovalRead"];
+export type ApprovalPage = Schemas["ApprovalPage"];
+
+// --- Activity (Phase 5.8/5.9) ---------------------------------------
+
+export type AuditEntryRead = Schemas["AuditEntryRead"];
+export type AuditPage = Schemas["AuditPage"];
+
+/** The four groups a person actually thinks in. */
+export type AuditCategory =
+  | "sign-in"
+  | "permissions"
+  | "connections"
+  | "approvals"
+  | "other";
+
+// --- Rate limits (Phase 5.7) ----------------------------------------
+
+export type LimitRead = Schemas["LimitRead"];
+export type LimitsRead = Schemas["LimitsRead"];
+
+// --- OAuth (Phase 5.3) ----------------------------------------------
+
+export type OAuthStart = Schemas["OAuthStart"];
+
+/**
+ * The lifecycle of one approval, from api/approvals.py.
+ *
+ * `expired` is deliberately distinct from `denied`: one is a human
+ * saying no, the other is a human never seeing the question, and the
+ * UI should not tell someone they refused something they never saw.
+ */
+export type ApprovalStatus =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "expired";
+
+/** service:resource:action, e.g. "github:issue:write". */
+export type ScopeAction = "read" | "write" | "admin";
+
 /**
  * The vocabulary the UI groups and colours by.
  *

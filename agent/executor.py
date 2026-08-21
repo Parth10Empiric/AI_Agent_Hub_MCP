@@ -22,7 +22,9 @@ from .execution import (
 from .permissions import (
     ApprovalHandler,
     PermissionPolicy,
+    ToolBudget,
     default_approval,
+    default_budget,
     default_policy,
 )
 from .registry import ToolRegistry
@@ -109,6 +111,7 @@ class ToolExecutor:
         "registry",
         "policy",
         "approval",
+        "budget",
         "timeout_seconds",
         "max_attempts",
         "backoff_base",
@@ -123,6 +126,7 @@ class ToolExecutor:
         *,
         policy: PermissionPolicy | None = None,
         approval: ApprovalHandler | None = None,
+        budget: ToolBudget | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         backoff_base: float = DEFAULT_BACKOFF_BASE,
@@ -132,8 +136,27 @@ class ToolExecutor:
     ) -> None:
 
         self.registry = registry
-        self.policy = policy or default_policy()
-        self.approval = approval or default_approval()
+
+        # `is None`, NOT `policy or default_policy()`.
+        #
+        # `or` asks whether the object is TRUTHY, and a policy object
+        # that defines __len__ is falsy when it is empty. So an agent
+        # configured with zero enabled tools - the most locked-down
+        # agent possible - would have its policy silently replaced by
+        # AllowAllPolicy and be allowed EVERYTHING.
+        #
+        # A fail-open bug, produced by a Python idiom that looks
+        # perfectly ordinary. Caught by
+        # tests/permissions/test_executor_gate.py.
+        self.policy = default_policy() if policy is None else policy
+        self.approval = (
+            default_approval() if approval is None else approval
+        )
+
+        # `is None`, for the same reason as the two above: a budget
+        # object that reports "zero remaining" must not be mistaken for
+        # "no budget configured" by a truthiness check.
+        self.budget = default_budget() if budget is None else budget
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max(1, max_attempts)
         self.backoff_base = backoff_base
@@ -286,11 +309,50 @@ class ToolExecutor:
                 ),
             )
 
+        # --- 4b. Is there budget left? -------------------------------
+        #
+        # AFTER permission, BEFORE approval, and both halves of that
+        # matter.
+        #
+        # After permission, so a call that was going to be refused
+        # anyway does not spend budget - otherwise a broken agent
+        # asking for a tool it cannot use would exhaust the user's
+        # hourly allowance and take the working tools down with it.
+        #
+        # Before approval, so a human is never asked to authorise
+        # something that is going to be refused the moment they say
+        # yes. Nothing is more corrosive to an approval prompt than
+        # discovering it did not mean anything.
+        budget = await self.budget.check(tool)
+
+        if not budget.allowed:
+            return build(
+                status=ExecutionStatus.DENIED,
+                tool=tool,
+                error=ToolError(
+                    code=ErrorCode.BUDGET_EXCEEDED,
+                    message=budget.reason,
+                    retry_after=budget.retry_after or None,
+                ),
+            )
+
         # --- 5. Does a human need to say yes? ------------------------
 
         approved: bool | None = None
 
-        if tool.requires_approval:
+        # ASK THE HANDLER, do not decide here.
+        #
+        # This used to read `if tool.requires_approval:` - the value
+        # Phase 2 classified from the tool's operation and risk. That
+        # is the right DEFAULT, but it is not the user's setting, and
+        # agent_tools.requires_approval was therefore stored, shown in
+        # the UI, and never consulted.
+        #
+        # The handler knows the agent's configuration; the executor
+        # does not, and should not. Every built-in handler answers this
+        # with tool.requires_approval, so behaviour is unchanged for
+        # them.
+        if self.approval.requires(tool):
 
             approved = await self.approval.request(tool, arguments)
 

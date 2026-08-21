@@ -55,6 +55,22 @@ class PluginSummary(BaseModel):
     account_label: str | None = None
     status: str | None = None
 
+    # Can this service be connected with a real OAuth flow right now?
+    #
+    # Answered from CONFIGURATION - whether a client id and secret are
+    # set - not from a hardcoded list. So the UI shows "Connect with
+    # GitHub" only where that button would actually work, and falls
+    # back to the paste-a-token dialog everywhere else. A button that
+    # leads to a broken consent screen is worse than no button.
+    oauth_available: bool = False
+
+    # What the flow will ask the provider for. Shown before the user
+    # leaves the app, because "we are about to request access to your
+    # files" is a sentence they should read on OUR page, where they
+    # trust the context, rather than on a consent screen they are
+    # trained to click through.
+    oauth_scopes: list[str] = Field(default_factory=list)
+
 
 class PluginDetail(PluginSummary):
     """A service, plus its full tool list."""
@@ -103,3 +119,28 @@ class ConnectionRead(BaseModel):
     last_used_at: datetime | None
     expires_at: datetime | None
     created_at: datetime
+
+
+class OAuthStart(BaseModel):
+    """
+    Where to send the browser to begin an OAuth flow.
+
+    A URL IN A JSON BODY, not a 302.
+
+    This endpoint is bearer-authenticated, and a browser NAVIGATION
+    cannot carry an Authorization header. If it answered with a
+    redirect the frontend would have to navigate here directly - and
+    then it could not authenticate at all.
+
+    So the frontend fetches this with a normal authenticated request
+    and then sets window.location to `authorize_url`. One extra round
+    trip, and no second authentication mechanism to maintain.
+    """
+
+    authorize_url: str
+
+    # Echoed back so the UI can show "you are about to grant: read your
+    # files, send messages" BEFORE the user leaves the app - on a page
+    # where they trust the context, rather than on a consent screen
+    # they have been trained to click through.
+    scopes: list[str] = Field(default_factory=list)

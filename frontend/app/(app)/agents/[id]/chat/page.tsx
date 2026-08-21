@@ -20,6 +20,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 
 import { ConversationSidebar } from "@/components/chat/conversation-sidebar";
 import { MessageInput } from "@/components/chat/message-input";
+import { UsageMeter } from "@/components/limits/usage-meter";
 import { MessageList } from "@/components/chat/message-list";
 import { getAgent } from "@/lib/api/agents";
 import { createConversation, listConversations } from "@/lib/api/conversations";
@@ -244,6 +245,7 @@ function ChatPage({ agentId }: { agentId: string }) {
             wrong transcript is worse than a skeleton. */}
         <ChatSurface
           key={conversationId}
+          agentId={agentId}
           agentName={agent.data.name}
           namespaces={namespaces}
           toolCount={agent.data.tool_count}
@@ -272,12 +274,14 @@ function ChatPage({ agentId }: { agentId: string }) {
  * it would have to run with `null` first and re-run on every id change.
  */
 function ChatSurface({
+  agentId,
   agentName,
   namespaces,
   toolCount,
   conversationId,
   disabled,
 }: {
+  agentId: string;
   agentName: string;
   namespaces: string[];
   toolCount: number;
@@ -305,8 +309,15 @@ function ChatSurface({
             </p>
           </div>
         ) : (
-          <MessageList history={history} live={live} />
+          <MessageList history={history} live={live} agentId={agentId} />
         )}
+      </div>
+
+      {/* Only appears once a budget is genuinely under pressure - a
+          row of meters above a chat box is noise, and noise is what
+          people stop reading before the one message that mattered. */}
+      <div className="px-1 pb-1">
+        <UsageMeter agentId={agentId} compact />
       </div>
 
       <MessageInput
