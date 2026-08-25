@@ -32,6 +32,20 @@ class ScopeOption(BaseModel):
     tool_count: int
     granted: bool = False
 
+    # Has the USER connected this service at all?
+    #
+    # A permission over a service with no account behind it cannot do
+    # anything - the tool would be offered, called, and fail at the
+    # credential resolver. Listing those scopes alongside the real ones
+    # is how a permissions page becomes a wall of choices that do not
+    # matter, and a wall is what people click through without reading.
+    #
+    # Reported rather than filtered out, deliberately. The server does
+    # not decide what a client shows: an already-granted scope for a
+    # service that was later disconnected MUST stay visible, or a live
+    # permission becomes invisible and cannot be revoked.
+    connected: bool = False
+
 
 class AgentScopes(BaseModel):
     """

@@ -1914,6 +1914,11 @@ export interface components {
              * @default false
              */
             granted: boolean;
+            /**
+             * Connected
+             * @default false
+             */
+            connected: boolean;
         };
         /**
          * ScopeRead

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent.engine import AgentEngine
 
 from api.audit import AuditAction, ResourceType
-from api.db.models import Agent, AgentScope, AuditLog
+from api.db.models import Agent, AgentScope, AuditLog, PluginConnection
 from api.pagination import Cursor, build_page
 from api.schemas.permission import (
     AgentScopes,
@@ -102,6 +102,7 @@ async def granted_scopes(
 def _options(
     engine: AgentEngine,
     granted: set[str],
+    connected: set[str] | None = None,
 ) -> list[ScopeOption]:
     """
     Every scope the live registry makes grantable, annotated.
@@ -109,6 +110,23 @@ def _options(
     Derived, not stored. A service added to the MCP server shows up
     here on the next restart with no migration - which is the same
     property that makes scope_catalog() the right validator.
+
+    `connected` is the set of services this USER has an account for.
+    Every scope is still returned; the ones over an unconnected service
+    are simply marked, so the client can put them out of the way.
+
+    Marked, NOT filtered. Two reasons, and the second is the important
+    one:
+
+      A permissions page is a security surface. If the server silently
+      dropped scopes, an agent that was granted github:*:write while
+      GitHub was connected would keep that grant after a disconnect -
+      with no row anywhere in the UI to revoke it. A permission you
+      cannot see is a permission you cannot take away.
+
+      Deciding what to hide is a presentation question, and the client
+      has the context to answer it (this screen wants them tucked away;
+      an audit view wants all of them).
     """
 
     counts: dict[str, int] = {}
@@ -138,6 +156,7 @@ def _options(
                 action=action,
                 tool_count=counts[scope],
                 granted=scope in granted,
+                connected=connected is None or service in connected,
             )
         )
 
@@ -163,9 +182,21 @@ async def list_scopes(
 
     granted = {row.scope for row in rows}
 
+    # Which services this USER has an account for. A scope over a
+    # service with no credential cannot do anything - the tool is
+    # offered, called, and fails at the credential resolver - so the
+    # client needs to know which choices are real.
+    connected = set(
+        await session.scalars(
+            select(PluginConnection.plugin_key).where(
+                PluginConnection.user_id == user_id
+            )
+        )
+    )
+
     return AgentScopes(
         granted=[ScopeRead.model_validate(row) for row in rows],
-        available=_options(engine, granted),
+        available=_options(engine, granted, connected),
     )
 
 

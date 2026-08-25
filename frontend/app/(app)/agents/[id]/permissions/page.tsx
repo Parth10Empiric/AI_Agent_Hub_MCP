@@ -96,6 +96,31 @@ export default function AgentPermissionsPage({
     [scopes.data],
   );
 
+  /**
+   * Which services get a full section, and which get one line.
+   *
+   * A service is shown in full when the user has connected it, OR when
+   * this agent already holds a grant over it. The second half is not
+   * an edge case: connect GitHub, grant a write, disconnect GitHub -
+   * the grant is still recorded and still applies the moment the
+   * service is reconnected. Tucking it away with the rest would make a
+   * live permission unrevocable from the only screen that revokes
+   * permissions.
+   */
+  const connectedGroups = useMemo(
+    () =>
+      groups.filter(
+        (group) =>
+          group.connected || group.options.some((o) => o.granted),
+      ),
+    [groups],
+  );
+
+  const unconnected = useMemo(
+    () => groups.filter((group) => !connectedGroups.includes(group)),
+    [groups, connectedGroups],
+  );
+
   if (scopes.isLoading) return <Skeleton className="h-96 w-full" />;
 
   if (scopes.isError || !scopes.data) {
@@ -141,9 +166,31 @@ export default function AgentPermissionsPage({
         </Alert>
       )}
 
-      {groups.map((group) => (
+      {/* SERVICES WITH NO ACCOUNT BEHIND THEM ARE NOT CHOICES.
+          A scope over a service the user has not connected cannot do
+          anything: the tool would be offered, called, and fail at the
+          credential resolver. Listing them beside the real ones turned
+          this page into a wall of switches, and a wall is what people
+          click through without reading - on the one screen where
+          reading is the entire point. */}
+      {connectedGroups.map((group) => (
         <section key={group.service} className="space-y-3">
-          <h2 className="font-semibold">{prettyNamespace(group.service)}</h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-semibold">
+              {prettyNamespace(group.service)}
+            </h2>
+
+            {/* An agent can hold a grant for a service that was
+                disconnected afterwards. The grant is still real and
+                still has to be revocable, so the section stays -
+                labelled, rather than hidden. A permission you cannot
+                see is a permission you cannot take away. */}
+            {!group.connected && (
+              <span className="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                not connected
+              </span>
+            )}
+          </div>
 
           <ul className="divide-y rounded-lg border">
             {group.options.map((option) => (
@@ -190,6 +237,46 @@ export default function AgentPermissionsPage({
           </ul>
         </section>
       ))}
+
+      {/* One line per service the user has never connected, instead of
+          a section of switches that could not take effect. It names
+          them rather than dropping them silently: "GitHub is missing
+          from this page" is a worse puzzle than one row saying why. */}
+      {unconnected.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="font-semibold text-muted-foreground">
+            Not connected
+          </h2>
+
+          <ul className="divide-y rounded-lg border border-dashed">
+            {unconnected.map((group) => (
+              <li
+                key={group.service}
+                className="flex items-center gap-3 px-4 py-3"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">
+                    {prettyNamespace(group.service)}
+                  </p>
+
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Connect an account to grant permissions for its{" "}
+                    {group.options.length}{" "}
+                    {group.options.length === 1
+                      ? "permission"
+                      : "permissions"}
+                    .
+                  </p>
+                </div>
+
+                <Button asChild size="sm" variant="outline">
+                  <Link href="/plugins">Connect</Link>
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="space-y-3">
         <div className="flex items-center justify-between">
@@ -249,9 +336,7 @@ export default function AgentPermissionsPage({
  * resources is how a user ends up granting eight narrow scopes by hand
  * that one broad one would have covered.
  */
-function groupByService(
-  options: ScopeOption[],
-): { service: string; options: ScopeOption[] }[] {
+function groupByService(options: ScopeOption[]): ScopeGroup[] {
   const map = new Map<string, ScopeOption[]>();
 
   for (const option of options) {
@@ -266,7 +351,18 @@ function groupByService(
     .map(([service, items]) => ({
       service,
       options: items.sort(byBreadthThenName),
+
+      // Every scope in a group shares a service, so they all carry the
+      // same answer - but reading it off the group rather than off one
+      // arbitrary member is what keeps this true if that ever changes.
+      connected: items.every((option) => option.connected),
     }));
+}
+
+interface ScopeGroup {
+  service: string;
+  options: ScopeOption[];
+  connected: boolean;
 }
 
 function byBreadthThenName(a: ScopeOption, b: ScopeOption): number {
