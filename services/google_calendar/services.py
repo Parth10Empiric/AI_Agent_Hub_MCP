@@ -1031,3 +1031,552 @@ class GoogleCalendarService:
 
         except HttpError as error:
             self._handle_http_error(error)
+    # =========================================================
+    # Calendar management
+    # =========================================================
+    #
+    # A note on the two collections Google exposes, because mixing
+    # them up is the most common Calendar API mistake:
+    #
+    #   calendars()      the calendar ITSELF - its events, its
+    #                    timezone. Deleting one destroys the events.
+    #
+    #   calendarList()   YOUR SUBSCRIPTION to a calendar - its colour
+    #                    in your sidebar, whether you get its
+    #                    notifications. Removing an entry only
+    #                    un-subscribes you; nobody else notices.
+    #
+    # They are separate methods below, named for which one they touch.
+
+    def create_calendar(
+        self,
+        summary: str,
+        description: str | None = None,
+        time_zone: str | None = None,
+    ):
+
+        if not summary or not summary.strip():
+            raise GoogleCalendarValidationError(
+                "Calendar summary (name) cannot be empty."
+            )
+
+        service = self.get_service()
+
+        body: dict = {"summary": summary.strip()}
+
+        if description is not None:
+            body["description"] = description
+
+        if time_zone:
+            body["timeZone"] = time_zone
+
+        try:
+
+            result = (
+                service.calendars()
+                .insert(body=body)
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "calendar": result,
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def update_calendar(
+        self,
+        calendar_id: str,
+        summary: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        time_zone: str | None = None,
+    ):
+
+        service = self.get_service()
+
+        body: dict = {}
+
+        if summary is not None:
+            if not summary.strip():
+                raise GoogleCalendarValidationError(
+                    "Calendar summary cannot be empty."
+                )
+            body["summary"] = summary.strip()
+
+        if description is not None:
+            body["description"] = description
+
+        if location is not None:
+            body["location"] = location
+
+        if time_zone is not None:
+            body["timeZone"] = time_zone
+
+        if not body:
+            raise GoogleCalendarValidationError(
+                "At least one field must be supplied."
+            )
+
+        try:
+
+            result = (
+                service.calendars()
+                .patch(
+                    calendarId=calendar_id,
+                    body=body,
+                )
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "calendar": result,
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def delete_calendar(
+        self,
+        calendar_id: str,
+    ):
+        """
+        Delete a calendar and every event on it. No undo.
+
+        Refuses "primary" outright. Google itself refuses it, but the
+        error is a generic 400, and an agent that reads "400" tends to
+        retry. Saying why here means it does not.
+        """
+
+        if calendar_id.strip().lower() == "primary":
+            raise GoogleCalendarValidationError(
+                "The primary calendar cannot be deleted. To empty it "
+                "instead, use clear_calendar - which also cannot be "
+                "undone."
+            )
+
+        service = self.get_service()
+
+        try:
+
+            service.calendars().delete(
+                calendarId=calendar_id,
+            ).execute()
+
+            return {
+                "success": True,
+                "deleted_calendar_id": calendar_id,
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def clear_calendar(
+        self,
+        calendar_id: str = "primary",
+    ):
+        """
+        Delete EVERY event on a calendar, keeping the calendar.
+
+        Google only allows this on the primary calendar.
+        """
+
+        service = self.get_service()
+
+        try:
+
+            service.calendars().clear(
+                calendarId=calendar_id,
+            ).execute()
+
+            return {
+                "success": True,
+                "cleared_calendar_id": calendar_id,
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def add_calendar_to_list(
+        self,
+        calendar_id: str,
+        color_id: str | None = None,
+        hidden: bool = False,
+        selected: bool = True,
+    ):
+        """Subscribe to an existing calendar."""
+
+        service = self.get_service()
+
+        body: dict = {"id": calendar_id}
+
+        if color_id:
+            body["colorId"] = color_id
+
+        body["hidden"] = hidden
+        body["selected"] = selected
+
+        try:
+
+            result = (
+                service.calendarList()
+                .insert(body=body)
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "calendar_list_entry": result,
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def remove_calendar_from_list(
+        self,
+        calendar_id: str,
+    ):
+        """
+        Un-subscribe from a calendar.
+
+        The calendar and its events are untouched - this only removes
+        it from YOUR list. Contrast delete_calendar.
+        """
+
+        service = self.get_service()
+
+        try:
+
+            service.calendarList().delete(
+                calendarId=calendar_id,
+            ).execute()
+
+            return {
+                "success": True,
+                "removed_calendar_id": calendar_id,
+                "note": (
+                    "Unsubscribed only. The calendar and its events "
+                    "still exist."
+                ),
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def update_calendar_list_entry(
+        self,
+        calendar_id: str,
+        color_id: str | None = None,
+        hidden: bool | None = None,
+        selected: bool | None = None,
+        summary_override: str | None = None,
+    ):
+
+        service = self.get_service()
+
+        body: dict = {}
+
+        if color_id is not None:
+            body["colorId"] = color_id
+
+        if hidden is not None:
+            body["hidden"] = hidden
+
+        if selected is not None:
+            body["selected"] = selected
+
+        if summary_override is not None:
+            body["summaryOverride"] = summary_override
+
+        if not body:
+            raise GoogleCalendarValidationError(
+                "At least one field must be supplied."
+            )
+
+        try:
+
+            result = (
+                service.calendarList()
+                .patch(
+                    calendarId=calendar_id,
+                    body=body,
+                )
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "calendar_list_entry": result,
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    # =========================================================
+    # Events - search, quick add, move, recurrence
+    # =========================================================
+
+    def search_events(
+        self,
+        query: str,
+        calendar_id: str = "primary",
+        time_min: str | None = None,
+        time_max: str | None = None,
+        max_results: int = 50,
+    ):
+        """Free-text search over a calendar's events."""
+
+        if not query or not query.strip():
+            raise GoogleCalendarValidationError(
+                "Search query cannot be empty."
+            )
+
+        service = self.get_service()
+
+        params: dict = {
+            "calendarId": calendar_id,
+            "q": query.strip(),
+            "maxResults": max(1, min(max_results, 2500)),
+            "singleEvents": True,
+            "orderBy": "startTime",
+        }
+
+        if time_min:
+            params["timeMin"] = time_min
+
+        if time_max:
+            params["timeMax"] = time_max
+
+        try:
+
+            response = (
+                service.events()
+                .list(**params)
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "events": [
+                    self._normalize_event(event)
+                    for event in response.get("items", [])
+                ],
+                "next_page_token": response.get("nextPageToken"),
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def quick_add_event(
+        self,
+        text: str,
+        calendar_id: str = "primary",
+    ):
+        """
+        Create an event from a sentence.
+
+        "Lunch with Sam tomorrow at 1pm" becomes a real event, with
+        Google doing the date parsing. Worth having as its own tool:
+        the alternative is the model computing an RFC3339 timestamp,
+        which is where it most often gets the year or the timezone
+        wrong.
+        """
+
+        if not text or not text.strip():
+            raise GoogleCalendarValidationError(
+                "Event text cannot be empty."
+            )
+
+        service = self.get_service()
+
+        try:
+
+            result = (
+                service.events()
+                .quickAdd(
+                    calendarId=calendar_id,
+                    text=text.strip(),
+                )
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "event": self._normalize_event(result),
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def move_event(
+        self,
+        event_id: str,
+        destination_calendar_id: str,
+        calendar_id: str = "primary",
+    ):
+        """Move an event to a different calendar."""
+
+        service = self.get_service()
+
+        try:
+
+            result = (
+                service.events()
+                .move(
+                    calendarId=calendar_id,
+                    eventId=event_id,
+                    destination=destination_calendar_id,
+                )
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "event": self._normalize_event(result),
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def list_event_instances(
+        self,
+        event_id: str,
+        calendar_id: str = "primary",
+        time_min: str | None = None,
+        time_max: str | None = None,
+        max_results: int = 50,
+    ):
+        """
+        The individual occurrences of a repeating event.
+
+        Needed to change or cancel ONE occurrence: the recurring event
+        has a single id, but each occurrence has its own, and only the
+        occurrence's id can be used to move or delete just that one.
+        """
+
+        service = self.get_service()
+
+        params: dict = {
+            "calendarId": calendar_id,
+            "eventId": event_id,
+            "maxResults": max(1, min(max_results, 2500)),
+        }
+
+        if time_min:
+            params["timeMin"] = time_min
+
+        if time_max:
+            params["timeMax"] = time_max
+
+        try:
+
+            response = (
+                service.events()
+                .instances(**params)
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "instances": [
+                    self._normalize_event(event)
+                    for event in response.get("items", [])
+                ],
+                "next_page_token": response.get("nextPageToken"),
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)
+
+    def respond_to_event(
+        self,
+        event_id: str,
+        response: str,
+        calendar_id: str = "primary",
+        comment: str | None = None,
+    ):
+        """
+        Accept, decline or tentatively accept an invitation.
+
+        Google has no "RSVP" endpoint. The attendee list has to be
+        read, the entry matching THIS user found and its
+        responseStatus changed, then the whole list written back -
+        and sending back a list with the other attendees missing
+        removes them from the event. That is the trap this method
+        exists to close.
+        """
+
+        allowed = {"accepted", "declined", "tentative"}
+
+        normalized = response.strip().lower()
+
+        if normalized not in allowed:
+            raise GoogleCalendarValidationError(
+                "response must be 'accepted', 'declined' or "
+                "'tentative'."
+            )
+
+        service = self.get_service()
+
+        try:
+
+            event = (
+                service.events()
+                .get(
+                    calendarId=calendar_id,
+                    eventId=event_id,
+                )
+                .execute()
+            )
+
+            attendees = event.get("attendees", [])
+
+            if not attendees:
+                raise GoogleCalendarValidationError(
+                    "This event has no attendees, so there is nothing "
+                    "to respond to."
+                )
+
+            # Which entry is US? Google marks it with "self": True.
+            # Matching on that rather than on an email address avoids
+            # getting it wrong for an account with aliases.
+            mine = [
+                attendee
+                for attendee in attendees
+                if attendee.get("self")
+            ]
+
+            if not mine:
+                raise GoogleCalendarValidationError(
+                    "You are not on this event's attendee list, so "
+                    "you cannot respond to it."
+                )
+
+            for attendee in mine:
+                attendee["responseStatus"] = normalized
+
+                if comment is not None:
+                    attendee["comment"] = comment
+
+            # The FULL list goes back, not just the changed entry.
+            result = (
+                service.events()
+                .patch(
+                    calendarId=calendar_id,
+                    eventId=event_id,
+                    body={"attendees": attendees},
+                )
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "response": normalized,
+                "event": self._normalize_event(result),
+            }
+
+        except HttpError as error:
+            self._handle_http_error(error)

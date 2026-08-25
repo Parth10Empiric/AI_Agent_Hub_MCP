@@ -13,6 +13,7 @@ from api.deps import (
     SettingsDep,
 )
 from api.schemas.plugin import (
+    ConnectionCheck,
     ConnectionRead,
     ConnectRequest,
     OAuthStart,
@@ -23,6 +24,10 @@ from api.oauth import OAuthError, ProviderNotConfigured
 from api.services import oauth_service, plugin_service
 from api.services.oauth_service import InvalidState, OAuthFlowError
 from api.services.plugin_service import UnknownPlugin
+from api.verification import (
+    CredentialRejected,
+    VerificationUnavailable,
+)
 
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
@@ -103,10 +108,23 @@ async def connect(
     store: CredentialStoreDep,
 ) -> ConnectionRead:
     """
-    Store an encrypted credential for this service.
+    Check the credential with the service, then store it encrypted.
 
     Reconnecting replaces the credential rather than failing, which is
     what a user means when they paste a new token.
+
+    THREE OUTCOMES, THREE STATUS CODES
+
+        201  verified, stored, genuinely connected
+        422  the service rejected it - the user's token is wrong
+        503  we could not ask - our problem, and it may work in a minute
+
+    422 and 503 are the pair worth being careful about. Both used to be
+    201, which is how "hello-world-1234" became a green Connected
+    badge. Collapsing them into each other now would be a smaller
+    version of the same lie: a rejection tells someone to fix their
+    token, and telling them that when GitHub was merely rate limiting
+    us sends them to revoke and regenerate a token that was fine.
     """
 
     try:
@@ -123,6 +141,68 @@ async def connect(
 
     except UnknownPlugin:
         raise _not_found(key) from None
+
+    except CredentialRejected as exc:
+        # The message comes from the verifier and is written for the
+        # person holding the token: which service said no, and what to
+        # check. It never contains the credential.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from None
+
+    except VerificationUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from None
+
+
+@router.post("/{key}/verify", response_model=ConnectionCheck)
+async def verify_connection(
+    key: str,
+    current_user: CurrentUser,
+    session: DbDep,
+    store: CredentialStoreDep,
+) -> ConnectionCheck:
+    """
+    Re-test a stored credential against the service.
+
+    Connecting proves a credential worked ONCE. Tokens are revoked on
+    the provider's website, expire, get rotated, or belong to an
+    account that loses access - and none of that notifies us. This is
+    how a user finds out before an agent turn does.
+
+    200 EVEN WHEN THE TOKEN IS BAD
+
+    "The check ran and the answer was no" is a successful request with
+    a negative result. It also has to be: recording that answer sets
+    `status = "revoked"`, and get_db rolls back whenever an endpoint
+    raises - so a 4xx here would report the dead token and then discard
+    the row that recorded it.
+
+    503 is reserved for the one case where nothing was learned: the
+    service could not be reached. Nothing is written then either.
+    """
+
+    try:
+        result = await plugin_service.verify_connection(
+            session, store, current_user.id, key
+        )
+
+    except VerificationUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from None
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No connection to {key!r}.",
+        )
+
+    return result
 
 
 @router.delete("/{key}/connect", status_code=status.HTTP_204_NO_CONTENT)

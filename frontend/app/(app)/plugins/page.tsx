@@ -18,7 +18,12 @@ import {
 } from "@/components/ui/card";
 
 import { ConnectDialog } from "@/components/plugins/connect-dialog";
-import { disconnectPlugin, listConnections, listPlugins } from "@/lib/api/plugins";
+import {
+  disconnectPlugin,
+  listConnections,
+  listPlugins,
+  verifyConnection,
+} from "@/lib/api/plugins";
 import { prettyNamespace } from "@/lib/tools";
 
 export default function PluginsPage() {
@@ -71,6 +76,37 @@ export default function PluginsPage() {
     onError: () => toast.error("Could not disconnect. Try again."),
   });
 
+  /**
+   * Ask the service whether a stored credential still works.
+   *
+   * `valid: false` arrives as a SUCCESS, not an error, and is shown as
+   * a warning rather than a failure - the check itself worked
+   * perfectly, and the answer it came back with is the useful part.
+   * Throwing here would mean "we could not reach the service", which
+   * is a genuinely different message and gets one.
+   */
+  const verify = useMutation({
+    mutationFn: verifyConnection,
+    onSuccess: (result) => {
+      if (result.valid) {
+        toast.success(result.detail);
+      } else {
+        toast.warning(result.detail);
+      }
+
+      // The status may have just changed to "revoked" - and the badge
+      // is the whole point of having run this.
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Could not reach the service to check.",
+      ),
+  });
+
   // A lookup, not a .find() inside the render loop. With four plugins
   // the difference is nothing; the habit is what matters, because the
   // nested version is quietly O(plugins x connections).
@@ -102,6 +138,16 @@ export default function PluginsPage() {
           const connection = byKey.get(plugin.key);
           const isConnected = connection?.status === "connected";
 
+          // THREE STATES, NOT TWO.
+          //
+          // A connection whose credential has stopped working is not
+          // the same as no connection, and rendering both as "Not
+          // connected" hides the one thing the user needs to know:
+          // there IS a stored token here and it no longer works. They
+          // would reconnect blind, or - worse - assume the feature is
+          // broken.
+          const isBroken = Boolean(connection) && !isConnected;
+
           return (
             <Card key={plugin.key} className="flex flex-col">
               <CardHeader>
@@ -128,11 +174,17 @@ export default function PluginsPage() {
                     className={
                       isConnected
                         ? "size-2 rounded-full bg-emerald-500"
-                        : "size-2 rounded-full bg-muted-foreground/40"
+                        : isBroken
+                          ? "size-2 rounded-full bg-amber-500"
+                          : "size-2 rounded-full bg-muted-foreground/40"
                     }
                   />
                   <span className="text-sm">
-                    {isConnected ? "Connected" : "Not connected"}
+                    {isConnected
+                      ? "Connected"
+                      : isBroken
+                        ? "Needs reconnecting"
+                        : "Not connected"}
                   </span>
 
                   {connection?.account_label && (
@@ -152,7 +204,24 @@ export default function PluginsPage() {
                       <Link href={`/plugins/${plugin.key}`}>View tools</Link>
                     </Button>
 
-                    {isConnected ? (
+                    {connection && (
+                      // Asks the SERVICE whether the stored token
+                      // still works. Connecting proved it worked once;
+                      // tokens are revoked and rotated elsewhere, and
+                      // nothing tells us when that happens.
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => verify.mutate(plugin.key)}
+                        disabled={verify.isPending}
+                      >
+                        {verify.isPending && verify.variables === plugin.key
+                          ? "Testing..."
+                          : "Test"}
+                      </Button>
+                    )}
+
+                    {connection ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -167,6 +236,15 @@ export default function PluginsPage() {
                         onClick={() => setConnecting(plugin.key)}
                       >
                         Connect
+                      </Button>
+                    )}
+
+                    {isBroken && (
+                      <Button
+                        size="sm"
+                        onClick={() => setConnecting(plugin.key)}
+                      >
+                        Reconnect
                       </Button>
                     )}
                   </div>

@@ -32,7 +32,7 @@ def get_agent_engine(request: Request) -> AgentEngine:
     The one AgentEngine, built during startup.
 
     Read from app.state rather than constructed here: discovery spawns
-    a subprocess and classifies 61 tools, which must happen once per
+    a subprocess and classifies 161 tools, which must happen once per
     process, not once per request.
     """
 

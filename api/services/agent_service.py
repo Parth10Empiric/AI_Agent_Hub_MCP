@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,6 +107,7 @@ def _summary(agent: Agent, tools: list[AgentTool]) -> AgentSummary:
 
 async def list_agents(
     session: AsyncSession,
+    engine: AgentEngine,
     user_id: uuid.UUID,
     *,
     include_archived: bool = False,
@@ -115,19 +118,32 @@ async def list_agents(
     TWO queries total regardless of how many agents there are - one for
     the agents, one for all their tools - because of selectinload.
     Without it this would be 1 + N.
+
+    The catalogue sync happens here too, in ONE batch for every agent
+    the user has, so the tool count on this page agrees with the one on
+    each agent's settings page. Two screens disagreeing about how many
+    tools an agent has is how the frozen-row bug stayed hidden.
     """
 
-    stmt = (
-        select(Agent)
-        .where(Agent.user_id == user_id)
-        .options(selectinload(Agent.tools))
-        .order_by(Agent.created_at.desc())
-    )
+    def load() -> list[Agent]:
+        stmt = (
+            select(Agent)
+            .where(Agent.user_id == user_id)
+            .options(selectinload(Agent.tools))
+            .order_by(Agent.created_at.desc())
+        )
 
-    if not include_archived:
-        stmt = stmt.where(Agent.is_archived.is_(False))
+        if not include_archived:
+            stmt = stmt.where(Agent.is_archived.is_(False))
 
-    agents = list(await session.scalars(stmt))
+        return stmt
+
+    agents = list(await session.scalars(load()))
+
+    # Only re-read when the sync actually inserted something - the
+    # common case is a no-op and does not deserve a second round trip.
+    if await sync_agent_tools(session, engine, [a.id for a in agents]):
+        agents = list(await session.scalars(load()))
 
     return [_summary(a, list(a.tools)) for a in agents]
 
@@ -135,15 +151,25 @@ async def list_agents(
 def _tool_rows_to_read(
     rows: list[AgentTool],
     registry_tools: dict[str, ToolDefinition],
+    granted: set[str] | None = None,
 ) -> list[AgentToolRead]:
     """
-    Merge stored settings with LIVE classification.
+    Merge stored settings with LIVE classification and LIVE permissions.
 
     A row whose tool the MCP server no longer exposes is reported with
     available=False rather than hidden. Hiding it would make a tool
     silently vanish from the agent's configuration; showing it lets the
     UI say "this tool is no longer available" and lets the user clean
     it up deliberately.
+
+    `granted` adds the same treatment for the OTHER reason a ticked
+    tool cannot run: no scope covers it. Without this the tool list was
+    the only screen in the product that could show a tool as ready when
+    it was not - see AgentToolRead for what that cost.
+
+    None means "do not compute it" - callers that have not loaded the
+    grants get the old, permissive default rather than a wrong answer
+    derived from an empty set, which would mark every tool unusable.
     """
 
     out: list[AgentToolRead] = []
@@ -151,6 +177,14 @@ def _tool_rows_to_read(
     for row in sorted(rows, key=lambda r: r.tool_name):
 
         definition = registry_tools.get(row.tool_name)
+
+        # Both halves of the real gate. A tool is usable only if it is
+        # switched on AND some granted scope covers it, which is
+        # exactly what DatabaseScopePolicy checks before a call runs.
+        if granted is None or definition is None:
+            permitted = True
+        else:
+            permitted = bool(granted.intersection(definition.permissions))
 
         out.append(
             AgentToolRead(
@@ -162,6 +196,18 @@ def _tool_rows_to_read(
                 operation=definition.operation.value if definition else None,
                 risk_level=definition.risk_level.value if definition else None,
                 available=definition is not None,
+                permitted=permitted,
+
+                # Sorted so the UI offers the same grant every time
+                # rather than whichever one a set happened to yield
+                # first. Any ONE of them is enough; which one to
+                # suggest is the UI's call, and it picks the narrowest
+                # ("github:issue:write" over "github:*:write") because
+                # the smallest grant that unblocks the user is the
+                # right default.
+                required_scopes=(
+                    sorted(definition.permissions) if definition else []
+                ),
             )
         )
 
@@ -175,18 +221,38 @@ async def get_agent(
     agent_id: uuid.UUID,
 ) -> AgentDetail:
 
-    agent = await _owned_agent(session, user_id, agent_id, with_tools=True)
+    # Ownership FIRST. sync_agent_tools writes, and nothing writes on
+    # behalf of an agent this user has not proved they own.
+    agent = await _owned_agent(session, user_id, agent_id, with_tools=False)
 
-    rows = list(agent.tools)
+    await sync_agent_tools(session, engine, [agent.id])
+
+    # Re-read rather than using agent.tools: the sync may have just
+    # inserted rows, and a relationship loaded before the INSERT would
+    # report the old catalogue - the exact staleness this call fixes.
+    rows = list(
+        await session.scalars(
+            select(AgentTool).where(AgentTool.agent_id == agent.id)
+        )
+    )
 
     registry_tools = {t.name: t for t in engine.get_tools()}
+
+    # The grants, so each tool can report whether it would actually
+    # run. One extra scalar query per agent detail - cheaper by far
+    # than a UI that shows a tool as ready when it is not.
+    granted = set(
+        await session.scalars(
+            select(AgentScope.scope).where(AgentScope.agent_id == agent.id)
+        )
+    )
 
     base = _summary(agent, rows)
 
     return AgentDetail(
         **base.model_dump(),
         system_prompt=agent.system_prompt,
-        tools=_tool_rows_to_read(rows, registry_tools),
+        tools=_tool_rows_to_read(rows, registry_tools, granted),
     )
 
 
@@ -204,16 +270,31 @@ def _default_rows(
 
     THE DEFAULT IS THE IMPORTANT PART:
 
-        enabled           = tool.read_only
+        enabled           = True
         requires_approval = tool.requires_approval
 
-    Both come from Phase 2 classification, so a new agent can READ
-    everything and WRITE nothing until the user deliberately opts in.
+    WHY EVERY ROW STARTS ENABLED, AND WHY THAT IS STILL SAFE
 
-    That direction is the correct one for a product holding somebody's
-    real GitHub account. The opposite default - everything on, switch
-    off what you fear - means the first mistake is destructive rather
-    than merely inconvenient.
+    `enabled` used to default to `tool.read_only`, because it was a
+    user-facing gate: a grid of checkboxes where writes started unticked
+    and you opted in tool by tool. That grid is gone. SCOPES are now the
+    only thing a user grants, and they are strictly coarser and no less
+    strict - a new agent is seeded with read scopes and nothing else
+    (api/scopes.py), so no write tool can run until somebody switches a
+    write permission on deliberately.
+
+    Keeping the read_only default underneath that would mean granting
+    "Create and change issues on GitHub" still did nothing, because a
+    second gate nobody can see any more would be shut. The tool would be
+    allowed and disabled at once, and the only symptom would be the
+    agent insisting it cannot write - the exact confusion the checkbox
+    grid was removed to end.
+
+    So the row opens, and the scope check in DatabaseScopePolicy -
+    unchanged, still ANDed with this flag in the executor - is what
+    actually decides. The flag stays because the API still accepts it:
+    it is now a "hide this specific tool from this agent" lever for
+    callers that want one, not the security boundary.
     """
 
     rows: list[dict] = []
@@ -223,7 +304,7 @@ def _default_rows(
         override = overrides.get(tool.name)
 
         if override is None:
-            enabled = tool.read_only
+            enabled = True
             requires_approval = tool.requires_approval
 
         else:
@@ -250,6 +331,113 @@ def _default_rows(
         )
 
     return rows
+
+
+async def sync_agent_tools(
+    session: AsyncSession,
+    engine: AgentEngine,
+    agent_ids: Sequence[uuid.UUID],
+) -> int:
+    """
+    Give existing agents the tools that shipped after they were made.
+
+    THE BUG THIS FIXES
+
+    `agent_tools` rows are written once, at creation, from whatever the
+    MCP server exposed that day. An agent created when GitHub had 18
+    tools and Slack had 14 keeps exactly 32 rows forever. GitHub now
+    exposes 65 and Slack 43 - and those 76 new tools have no row, so
+    they are invisible to that agent no matter what its permissions
+    say. The settings page reported "32 of 32 tools available", which
+    was true about the rows and false about the product.
+
+    Removing tools always appeared to work, because a row whose tool is
+    gone is reported as unavailable. Only the growing direction was
+    broken - which is why it looked like a cap.
+
+    WHY A LAZY SYNC RATHER THAN A MIGRATION
+
+    A migration runs once; the catalogue grows every time you add a
+    service. This runs on the read paths, is idempotent, and inserts
+    nothing on the overwhelmingly common call where the agent is
+    already current - one SELECT, no write.
+
+    WHICH TOOLS AN AGENT GETS
+
+    The namespaces it already has rows for. That preserves the choice
+    made in the create wizard: an agent given GitHub and Slack picks up
+    new GitHub and Slack tools, and never silently acquires Google
+    Drive because someone connected it later.
+
+    NOT A PERMISSION CHANGE, SO NOT AUDITED
+
+    A new row is `enabled` and covered by nothing. Whether the agent
+    may call it is still decided by its scopes, which this does not
+    touch. Adding the row only makes the tool visible to a policy that
+    was already going to be asked about it.
+
+    Returns the number of rows inserted, so callers can skip work.
+    """
+
+    if not agent_ids:
+        return 0
+
+    existing = list(
+        await session.execute(
+            select(
+                AgentTool.agent_id,
+                AgentTool.namespace,
+                AgentTool.tool_name,
+            ).where(AgentTool.agent_id.in_(agent_ids))
+        )
+    )
+
+    # agent -> what it has, and which services it is configured for.
+    have: dict[uuid.UUID, set[str]] = {}
+    namespaces: dict[uuid.UUID, set[str]] = {}
+
+    for agent_id, namespace, tool_name in existing:
+        have.setdefault(agent_id, set()).add(tool_name)
+        namespaces.setdefault(agent_id, set()).add(namespace)
+
+    by_namespace: dict[str, list[ToolDefinition]] = {}
+
+    for tool in engine.get_tools():
+        by_namespace.setdefault(tool.namespace or "", []).append(tool)
+
+    added = 0
+
+    for agent_id, agent_namespaces in namespaces.items():
+
+        missing = [
+            tool
+            for namespace in agent_namespaces
+            for tool in by_namespace.get(namespace, [])
+            if tool.name not in have.get(agent_id, set())
+        ]
+
+        if not missing:
+            continue
+
+        # Same defaults a brand-new agent would get, from the same
+        # function - so a tool added today is configured identically
+        # whether the agent was created before or after it existed.
+        for row in _default_rows(missing, {}):
+            session.add(AgentTool(agent_id=agent_id, **row))
+            added += 1
+
+    if added:
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Two requests synced the same agent at once and the unique
+            # constraint on (agent_id, tool_name) caught the loser.
+            # Nothing is wrong: the rows exist either way. Roll back so
+            # the session is usable and report no work done.
+            await session.rollback()
+            return 0
+
+    return added
 
 
 def _tools_for_plugins(

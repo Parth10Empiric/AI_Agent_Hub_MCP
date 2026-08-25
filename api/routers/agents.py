@@ -39,10 +39,12 @@ def _not_found() -> HTTPException:
 async def list_agents(
     current_user: CurrentUser,
     session: DbDep,
+    engine: AgentEngineDep,
     include_archived: bool = Query(default=False),
 ) -> list[AgentSummary]:
     return await agent_service.list_agents(
         session,
+        engine,
         current_user.id,
         include_archived=include_archived,
     )

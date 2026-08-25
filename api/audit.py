@@ -79,6 +79,12 @@ class AuditAction(str, Enum):
     PLUGIN_REFRESHED = "plugin.refreshed"
     PLUGIN_REFRESH_FAILED = "plugin.refresh_failed"
 
+    # A stored credential re-checked and refused by the service.
+    # Worth a permanent row: it is the moment a connection the user
+    # believes in stopped being true, and the audit trail is where
+    # "when did GitHub stop working?" gets an answer.
+    PLUGIN_CHECK_FAILED = "plugin.check_failed"
+
     # --- approvals -----------------------------------------------------
     #
     # All four, not just the resolutions. "Requested but never

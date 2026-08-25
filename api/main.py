@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -7,6 +8,7 @@ from fastapi import FastAPI
 
 from core.logging import get_logger, setup_logging
 
+from agent.embeddings import OllamaEmbeddingProvider
 from agent.engine import AgentEngine
 
 from api.credentials import build_credential_store
@@ -56,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     the yield.
 
     This is where expensive, long-lived things belong. The AgentEngine
-    spawns the MCP subprocess and classifies 61 tools - seconds of work
+    spawns the MCP subprocess and classifies 161 tools - seconds of work
     that must happen ONCE, not per request. Phase 3 steps 4 and 5 add
     it here.
     """
@@ -83,15 +85,57 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The MCP subprocess and the tool registry are built ONCE.
     #
     # Discovery spawns a subprocess, performs the MCP handshake, lists
-    # 61 tools and classifies every one of them. Seconds of work. Doing
+    # 161 tools and classifies every one of them. Seconds of work. Doing
     # it per request is not slow, it is impossible.
     provider = SharedSessionProvider()
     await provider.start()
 
-    agent_engine = AgentEngine(server_name="personal-mcp-server")
+    # PHASE 5.8: the semantic half of the hybrid router, switched on.
+    #
+    # It has been optional since Phase 2.3 and the reasoning for
+    # leaving it off was sound at the time: 161 tools with short,
+    # distinctive names are matched well by keywords alone, and
+    # embeddings cost a network round trip.
+    #
+    # What changed is the kind of request being routed. Keyword scoring
+    # can only rank a tool by words the tool CONTAINS, so a request
+    # phrased in terms of the user's goal rather than the tool's
+    # vocabulary - "summarise this repo", "what is this built with" -
+    # gives it nothing to work with, and it returns a tie. Semantics
+    # are what break that tie. See WEIGHT_SEMANTIC and
+    # FLAT_LEXICAL_SPREAD in agent/router.py.
+    #
+    # Fails soft in every direction: no model pulled, Ollama down, a
+    # timeout - the provider disables itself and routing is exactly
+    # what it was before this block existed.
+    agent_engine = AgentEngine(
+        server_name="personal-mcp-server",
+        embedding_provider=(
+            OllamaEmbeddingProvider(model=settings.embedding_model)
+            if settings.embeddings_enabled
+            else None
+        ),
+    )
 
     async with provider.session() as mcp_session:
         count = await agent_engine.discover_tools(mcp_session)
+
+    # Embed every tool now, off the request path.
+    #
+    # `to_thread` because the embedding call is synchronous: run
+    # directly, it would block the event loop for the length of one
+    # HTTP round trip. Harmless during startup, fatal as a habit - so
+    # it is done correctly here rather than "just this once".
+    if settings.embeddings_enabled:
+
+        warmed = await asyncio.to_thread(agent_engine.warm_embeddings)
+
+        logger.info(
+            "semantic routing: %s",
+            f"{warmed} tools embedded"
+            if warmed
+            else "unavailable, using keyword routing only",
+        )
 
     app.state.mcp_provider = provider
     app.state.agent_engine = agent_engine

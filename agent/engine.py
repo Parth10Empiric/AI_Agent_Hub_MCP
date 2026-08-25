@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from .adapters.ollama import OllamaToolAdapter
@@ -114,6 +115,7 @@ class AgentEngine:
         top_k: int | None = None,
         previous_namespaces: tuple[str, ...] | None = None,
         exclude: set[str] | None = None,
+        allow: Callable[[ToolDefinition], bool] | None = None,
     ) -> RoutingDecision:
         """
         Choose the tools relevant to one user message.
@@ -123,6 +125,10 @@ class AgentEngine:
 
         `exclude` drops tools from consideration, which is what makes a
         second routing pass return something genuinely different.
+
+        `allow` drops tools this caller cannot use, so the budget is
+        spent only on tools that could actually run. See
+        ToolRouter.route.
         """
 
         return self.router.route(
@@ -130,6 +136,7 @@ class AgentEngine:
             top_k=top_k,
             previous_namespaces=previous_namespaces,
             exclude=exclude,
+            allow=allow,
         )
 
     def route_by_namespace(
@@ -141,6 +148,18 @@ class AgentEngine:
         """
 
         return self.router.route_by_namespace(namespaces)
+
+    def warm_embeddings(self) -> int:
+        """
+        Precompute the semantic index. Startup only - see ToolRouter.warm.
+
+        BLOCKING, and it says so here because the caller has to care:
+        embedding 161 tools is one synchronous HTTP round trip, and an
+        async server must run it in a thread or it stalls its own event
+        loop while starting up.
+        """
+
+        return self.router.warm()
 
     def select_mcp_tools(
         self,

@@ -10,6 +10,7 @@
 import { api } from "./client";
 import type {
   ConnectRequest,
+  ConnectionCheck,
   ConnectionRead,
   OAuthStart,
   PluginDetail,
@@ -35,6 +36,25 @@ export function connectPlugin(
   return api<ConnectionRead>(
     `/api/plugins/${encodeURIComponent(key)}/connect`,
     { method: "POST", json: payload },
+  );
+}
+
+/**
+ * Re-test a stored credential against the service.
+ *
+ * Connecting proves a token worked ONCE. It can be revoked on the
+ * provider's site, expire, or be rotated by a policy - and none of
+ * that notifies us, so a connection is a claim with a shelf life.
+ *
+ * Resolves with `valid: false` rather than throwing when the service
+ * says no: that is a successful check with a negative answer, and the
+ * caller wants to render it, not catch it. It throws only when the
+ * service could not be reached at all.
+ */
+export function verifyConnection(key: string): Promise<ConnectionCheck> {
+  return api<ConnectionCheck>(
+    `/api/plugins/${encodeURIComponent(key)}/verify`,
+    { method: "POST" },
   );
 }
 

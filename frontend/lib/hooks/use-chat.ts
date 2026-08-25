@@ -8,6 +8,7 @@ import type { PendingApprovalEvent } from "@/components/approvals/approval-reque
 import { streamTurn, type StreamEvent } from "./use-sse";
 import type {
   ApprovalRequired,
+  ApprovalStatus,
   ExecutionRead,
   MessageRead,
 } from "@/lib/types";
@@ -23,6 +24,19 @@ export interface TimelineRow {
   tool_name: string;
   pending: boolean;
   execution?: ExecutionRead;
+}
+
+/**
+ * One approval question, and its answer once there is one.
+ *
+ * `status` is null while the turn is genuinely parked on it. Anything
+ * else means the question is settled - by this tab, by another tab, or
+ * by the clock running out - and the card renders that outcome instead
+ * of a countdown.
+ */
+export interface TurnApproval {
+  event: PendingApprovalEvent;
+  status: ApprovalStatus | null;
 }
 
 export type TurnPhase =
@@ -48,11 +62,24 @@ export interface LiveTurn {
   // carries the whole ChatResponse.
   approvals: ApprovalRequired[];
 
-  // The call the agent has stopped on, if any. Present only while the
-  // turn is genuinely parked - `approval_resolved` clears it, and the
-  // stream then carries on with tool_start for the very call this
-  // answered.
-  pendingApproval: PendingApprovalEvent | null;
+  /**
+   * Every approval this turn asked about, in the order it asked.
+   *
+   * WAS `pendingApproval: PendingApprovalEvent | null`, AND THAT WAS
+   * THE BUG PEOPLE SAW.
+   *
+   * A single nullable slot meant `approval_resolved` had nowhere to
+   * put the answer, so it set the slot to null - and the card
+   * UNMOUNTED. Click Deny and the prompt simply disappeared: the
+   * "Denied. Nothing was changed in your accounts." footer the card
+   * renders was never on screen long enough to read, and after a
+   * reload there was nothing at all.
+   *
+   * Keeping the list means an answered question stays where it was
+   * asked, showing what the answer was. Which is the whole point of
+   * asking it in the chat rather than in a modal.
+   */
+  approvalRequests: TurnApproval[];
 
   error?: string;
 
@@ -116,7 +143,7 @@ export function useChat(conversationId: string) {
         answer: "",
         timeline: [],
         approvals: [],
-        pendingApproval: null,
+        approvalRequests: [],
       });
 
       try {
@@ -199,6 +226,24 @@ function applyEvent(
       case "round_start":
         return { ...prev, phase: "thinking" };
 
+      // The agent went looking for tools it was not given. The count
+      // in the routing strip is what the model can currently reach, so
+      // it has to grow when the tool set does - otherwise the header
+      // says "8 tools" while the agent is calling a ninth.
+      case "tool_search": {
+        const added = (data.added as number) ?? 0;
+
+        if (!prev.routing || added === 0) return prev;
+
+        return {
+          ...prev,
+          routing: {
+            ...prev.routing,
+            tools: prev.routing.tools + added,
+          },
+        };
+      }
+
       case "tool_start": {
         const toolName = String(data.tool ?? "unknown");
 
@@ -256,27 +301,51 @@ function applyEvent(
         return { ...prev, phase: "thinking", timeline };
       }
 
-      case "approval_required":
+      case "approval_required": {
         // The turn has stopped. Nothing else will arrive on this
         // stream until the approval is resolved or its timer runs
         // out - which is exactly why the card carries its own
         // countdown rather than a spinner.
+        const event = data as unknown as PendingApprovalEvent;
+
+        // Guard against a replayed frame adding the same question
+        // twice. Same reasoning as the tool_end duplicate check.
+        if (
+          prev.approvalRequests.some(
+            (entry) => entry.event.approval_id === event.approval_id,
+          )
+        ) {
+          return prev;
+        }
+
         return {
           ...prev,
           phase: "waiting",
-          pendingApproval: data as unknown as PendingApprovalEvent,
+          approvalRequests: [
+            ...prev.approvalRequests,
+            { event, status: null },
+          ],
         };
+      }
 
-      case "approval_resolved":
-        // Fires for approve, deny AND expiry, so this one case clears
-        // the card however the question was settled. The card itself
-        // has already shown the outcome; this is the server confirming
-        // it, and a resolution from ANOTHER tab arrives here too.
+      case "approval_resolved": {
+        // Fires for approve, deny AND expiry. The answer is RECORDED
+        // on the question rather than clearing it, so the user can see
+        // what they chose - a resolution from another tab, or from the
+        // clock, lands here too and is shown the same way.
+        const id = String(data.approval_id ?? "");
+        const status = String(data.status ?? "denied") as ApprovalStatus;
+
         return {
           ...prev,
           phase: "thinking",
-          pendingApproval: null,
+          approvalRequests: prev.approvalRequests.map((entry) =>
+            entry.event.approval_id === id
+              ? { ...entry, status }
+              : entry,
+          ),
         };
+      }
 
       case "answer_ready":
         return {
@@ -293,10 +362,18 @@ function applyEvent(
 
           // The final event is the whole persisted ChatResponse, so
           // this is the first and only place the refused calls appear.
+          // Only REFUSALS are in it - an approved call is not
+          // something the agent "needed permission for".
           approvals: (data.approvals_required as ApprovalRequired[]) ?? [],
 
-          // Whatever happened, nothing is waiting any more.
-          pendingApproval: null,
+          // Nothing is waiting any more. A question still showing no
+          // answer at this point was never resolved, so it is marked
+          // expired rather than left spinning a countdown forever.
+          approvalRequests: prev.approvalRequests.map((entry) =>
+            entry.status === null
+              ? { ...entry, status: "expired" as ApprovalStatus }
+              : entry,
+          ),
         };
 
       case "error": {

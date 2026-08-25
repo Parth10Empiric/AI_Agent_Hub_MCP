@@ -90,6 +90,28 @@ class APISettings(BaseSettings):
     # short enough that a closed tab does not leak a turn.
     approval_timeout_seconds: int = 300
 
+    # --- Semantic routing (Phase 5.8) -------------------------------
+
+    # Whether the router may use embeddings alongside keyword scoring.
+    #
+    # The seam has existed since Phase 2.3 and was never switched on,
+    # which meant the `semantic` column of every score breakdown in
+    # production read 0.0000. That was fine while queries named tool
+    # vocabulary ("list my github issues") and useless the moment one
+    # did not ("summarise this repo"), because the keyword layer then
+    # has nothing to work with and no second opinion to fall back on.
+    #
+    # A flag rather than a hard dependency: the provider fails soft to
+    # lexical-only scoring, and this makes that a decision rather than
+    # an accident.
+    embeddings_enabled: bool = True
+
+    # Small, fast, and already on the machine that serves the chat
+    # model. `ollama pull nomic-embed-text` is the only setup step; if
+    # it is missing, the provider disables itself and routing degrades
+    # to exactly what it did before this flag existed.
+    embedding_model: str = "nomic-embed-text"
+
     # --- Rate limits (Phase 5.7) ------------------------------------
 
     # Off switch, for local development and for the moment a limit

@@ -39,6 +39,11 @@ export type StreamEventName =
   | "tool_start"
   | "tool_end"
   | "escalation"
+  // The agent asked the router for MORE tools mid-turn, because what
+  // it was given could not do the job. Distinct from "escalation",
+  // which is the same widening done automatically after a round of
+  // failures - here the model asked.
+  | "tool_search"
   | "answer_ready"
   | "done"
   | "error";

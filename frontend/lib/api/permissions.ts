@@ -2,15 +2,14 @@
  * Agent scopes and the permission audit trail (Phase 5.1).
  *
  * A SCOPE is a coarse grant - "this agent may read GitHub" - written
- * as service:resource:action. It is a different question from the
- * per-tool checkboxes:
+ * as service:resource:action. It is the ONLY permission the UI grants.
  *
- *     tools    which tools are switched on?      a preference
- *     scopes   what class of action is allowed?  the security envelope
- *
- * Both are checked independently by the backend before any tool runs,
- * so ticking a write tool does NOT by itself give the agent write
- * access. Two deliberate actions, not one.
+ * There was once a second, finer gate: a per-tool checkbox grid. It
+ * answered a near-identical question with a worse instrument - 108
+ * boxes nobody reads, where a ticked write tool with no scope behind it
+ * silently could not run. The grid is gone; a scope is one sentence a
+ * person can actually mean, and it keeps meaning the same thing as the
+ * tool catalogue grows.
  */
 
 import { api } from "./client";

@@ -90,14 +90,16 @@ class AgentTool(UUIDMixin, Base):
     """
     One tool this agent may use, with the user's overrides.
 
-    The defaults come straight from Phase 2 classification:
+    The defaults:
 
-        enabled           = tool.read_only
-        requires_approval = tool.requires_approval
+        enabled           = True
+        requires_approval = tool.requires_approval  (Phase 2)
 
-    So a new agent can read but not write, and the user opts in to
-    writes deliberately. That is the correct direction for a product
-    holding someone's real GitHub account.
+    `enabled` no longer answers "may this agent write?" - a granted
+    SCOPE does, and a new agent is seeded with read scopes only. This
+    column is now the narrow lever: hide one specific tool from one
+    agent. The executor still ANDs the two, so a row left open is not a
+    permission; it just stops being a second, invisible veto.
 
     No TimestampMixin: this is a settings row, not an event. created_at
     on it would never be read.

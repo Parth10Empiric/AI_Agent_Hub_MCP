@@ -105,7 +105,7 @@ class ToolDefinition:
     the executor and (later) the permission engine. If any of them
     could edit it, a routing bug could silently change a risk level.
 
-    `slots=True` removes the per-instance __dict__. With 61 tools it
+    `slots=True` removes the per-instance __dict__. With 161 tools it
     saves little memory, but it also makes typos fatal: assigning
     `tool.risk_lvl = ...` raises instead of silently creating a new
     attribute that nothing reads.

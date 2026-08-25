@@ -20,7 +20,7 @@ Why the lexical layer comes first:
   - It is deterministic. When a query mis-routes you can reproduce the
     exact comparison. Embedding similarity is a black box you can only
     tune by swapping models.
-  - With 61 tools it is already accurate. Semantic search earns its
+  - With 161 tools it is already accurate. Semantic search earns its
     cost when tool descriptions are long and varied; yours are four
     words each, so there is very little for an embedding to capture
     that the name and keyword lists do not already say.
@@ -104,12 +104,77 @@ class OllamaEmbeddingProvider:
     Optional components must fail soft.
     """
 
-    __slots__ = ("_model", "_cache", "_available")
+    __slots__ = (
+        "_model",
+        "_cache",
+        "_available",
+        "_failures",
+        "_timeout",
+        "_worked_once",
+    )
 
-    def __init__(self, model: str = "nomic-embed-text") -> None:
+    # A hung embedding server must not become a hung conversation.
+    #
+    # `embed` is SYNCHRONOUS and the router that calls it is called
+    # from async request handlers, so a request with no timeout does
+    # not slow one turn down - it blocks the event loop, and with it
+    # every other user's request, MCP read and SSE heartbeat. The same
+    # rule that made agent/loop.py insist on AsyncClient applies here,
+    # and a timeout is the cheap half of it. The other half is warming
+    # the cache at startup so the hot path embeds one short string.
+    DEFAULT_TIMEOUT = 10.0
+
+    # How many texts go in one request to the embedding server.
+    #
+    # Found by measurement, not by taste. Embedding all 161 tools in a
+    # single call takes longer than DEFAULT_TIMEOUT on an ordinary
+    # laptop, so the startup warm-up timed out, the provider concluded
+    # it was misconfigured and disabled itself - and semantic routing
+    # was silently off in exactly the deployment it was written for.
+    #
+    # Locally: 32 texts in ~2.4s, 64 in ~5.9s, one query in ~0.11s. A
+    # batch that comfortably clears the timeout keeps the failure
+    # detector meaningful, and 6 requests at startup cost nothing.
+    #
+    # This is why the timeout and the batch size have to be chosen
+    # TOGETHER: a timeout is a statement about how long ONE request
+    # should take, and it is meaningless if the caller decides how big
+    # a request is somewhere else.
+    BATCH_SIZE = 32
+
+    # Consecutive failures tolerated ONCE THE PROVIDER HAS WORKED.
+    #
+    # The original version disabled itself on the first exception,
+    # which is right for "you never pulled the model" and wrong for
+    # "the server was restarting". The two are indistinguishable from a
+    # single exception - but not from WHEN it happened:
+    #
+    #     fails on the very first call   misconfigured. It was never
+    #                                    going to work, and every retry
+    #                                    costs a full timeout on a real
+    #                                    user's turn.
+    #
+    #     fails after succeeding         weather. Retry.
+    #
+    # So the first call is decisive and later ones are forgiven. That
+    # matters because the first call is `warm()`, at startup, where a
+    # permanent verdict costs nobody anything - and it means a
+    # deployment with no embedding model pulled pays one timeout for
+    # the life of the process instead of one per turn until the
+    # counter fills.
+    MAX_CONSECUTIVE_FAILURES = 3
+
+    def __init__(
+        self,
+        model: str = "nomic-embed-text",
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
         self._model = model
         self._cache: dict[str, list[float]] = {}
         self._available = True
+        self._failures = 0
+        self._timeout = timeout
+        self._worked_once = False
 
     @property
     def is_enabled(self) -> bool:
@@ -126,27 +191,54 @@ class OllamaEmbeddingProvider:
             if text not in self._cache
         ]
 
-        if missing:
+        for start in range(0, len(missing), self.BATCH_SIZE):
+
+            batch = missing[start:start + self.BATCH_SIZE]
+
             try:
                 import ollama
 
-                response = ollama.embed(
+                response = ollama.Client(
+                    timeout=self._timeout,
+                ).embed(
                     model=self._model,
-                    input=missing,
+                    input=batch,
                 )
 
                 vectors = response.get("embeddings", [])
 
-                for text, vector in zip(missing, vectors):
+                # An empty reply is a failure that did not raise: the
+                # server answered, with nothing. Treated as a failure
+                # rather than cached, or every tool would be recorded
+                # as having an empty vector and the provider would
+                # report itself healthy forever.
+                if not vectors:
+                    raise RuntimeError("no embeddings returned")
+
+                for text, vector in zip(batch, vectors):
                     self._cache[text] = list(vector)
 
-            except Exception:
-                # Disable permanently for this process. Retrying a
-                # broken embedding server on every keystroke would add
-                # latency to every message for no benefit.
-                self._available = False
-                return [[] for _ in texts]
+                self._failures = 0
+                self._worked_once = True
 
+            except Exception:
+
+                self._failures += 1
+
+                # Give up for this process. Retrying a broken embedding
+                # server on every message would add its full timeout to
+                # every message, for no benefit.
+                if (
+                    not self._worked_once
+                    or self._failures >= self.MAX_CONSECUTIVE_FAILURES
+                ):
+                    self._available = False
+                    break
+
+        # Whatever DID embed is returned, including on a partial
+        # failure. A tool with no vector scores 0.0 on the semantic
+        # signal, which is the same as running without embeddings -
+        # so half an index is strictly better than none.
         return [
             self._cache.get(text, [])
             for text in texts

@@ -304,11 +304,32 @@ def _resolve(namespace: str, factory: Callable[[str | None], Any]) -> Any:
 
     token = credential_for(namespace)
 
-    if token is None and not env_credentials_allowed():
-        raise MissingCredential(
-            f"No {namespace} credentials for this request. "
-            f"Connect {namespace} in Agent Hub and try again."
-        )
+    if token is None:
+
+        # WHOSE REQUEST IS THIS?
+        #
+        # The .env fallback exists for the local development loop -
+        # ai_client.py, test_github.py, a script - which call this
+        # server with no metadata at all and no user behind them.
+        #
+        # A request that names a user is a completely different thing.
+        # The backend sets user_id on EVERY call it makes on somebody's
+        # behalf (api/mcp/credentials.py), so "a user id but no token"
+        # means exactly one thing: that person has not connected this
+        # service, or their token could not be decrypted or refreshed.
+        # Serving them from .env would hand them the OPERATOR's account
+        # - the precise cross-tenant leak this module exists to close -
+        # and it would look, to them, like the feature working.
+        #
+        # So the fallback is decided per request rather than per
+        # deployment. The CLI keeps working in development; a real
+        # user's request never silently borrows somebody else's
+        # account, in ANY environment.
+        if current_user_id() is not None or not env_credentials_allowed():
+            raise MissingCredential(
+                f"No {namespace} credentials for this request. "
+                f"Connect {namespace} in Agent Hub and try again."
+            )
 
     key = (namespace, _fingerprint(token))
 

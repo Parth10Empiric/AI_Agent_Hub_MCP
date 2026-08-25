@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.execution import redact_arguments
+from agent.permissions import ApprovalOutcome
 from agent.schemas import RiskLevel, ToolDefinition
 
 from api.audit import AuditAction, ResourceType
@@ -100,16 +101,24 @@ def may_auto_approve(tool: ToolDefinition) -> bool:
 @dataclass(slots=True)
 class ApprovalRecord:
     """
-    A call that was blocked because nobody could confirm it.
+    A call that needed a human and did not get a yes.
 
-    Returned to the caller of the non-streaming endpoint so the API can
-    say exactly what would have needed confirming.
+    Returned to the caller so the API can say exactly what was stopped
+    and, just as importantly, WHY.
+
+    `status` is the half that used to be missing. All three refusals
+    end with the call not running, but "you denied this", "you did not
+    answer in time" and "there was nobody to ask" are three different
+    things to tell somebody, and only one of them is true at a time.
     """
 
     tool_name: str
     operation: str
     risk_level: str
     arguments: dict
+
+    # "denied" | "expired" | "unavailable" - see ApprovalOutcome.
+    status: str = "unavailable"
 
 
 class DeferredApproval:
@@ -148,7 +157,7 @@ class DeferredApproval:
         self,
         tool: ToolDefinition,
         arguments: dict,
-    ) -> bool:
+    ) -> ApprovalOutcome:
 
         self.pending.append(
             ApprovalRecord(
@@ -160,10 +169,15 @@ class DeferredApproval:
                 # to ask a human about this call, so the values would
                 # be shown to nobody and logged to everybody.
                 arguments={key: "..." for key in arguments},
+
+                # Nobody was asked. NOT "denied" - telling someone they
+                # refused a request they never saw is a lie the UI then
+                # repeats back to them.
+                status="unavailable",
             )
         )
 
-        return False
+        return ApprovalOutcome.unavailable()
 
 
 def _requires(
@@ -276,7 +290,7 @@ class WebApproval:
         self,
         tool: ToolDefinition,
         arguments: dict,
-    ) -> bool:
+    ) -> ApprovalOutcome:
 
         record = await self._persist(tool, arguments)
 
@@ -312,7 +326,8 @@ class WebApproval:
                         "status": str(ApprovalStatus.EXPIRED),
                     },
                 )
-                return False
+                self._refused(record, "expired")
+                return ApprovalOutcome.expired()
 
             # The event only says "go and look". The DATABASE is the
             # source of truth - a spurious wakeup, a double click or a
@@ -342,7 +357,15 @@ class WebApproval:
                 },
             )
 
-            return approved
+            if approved:
+                return ApprovalOutcome.approve()
+
+            # A human said no - either by clicking Deny, or by having
+            # revoked the permission while this sat waiting. Both are a
+            # decision, not an absence of one, so both are "denied".
+            self._refused(record, "denied")
+
+            return ApprovalOutcome.deny()
 
         finally:
             # Always. A turn that raises still has to drop its slot, or
@@ -405,16 +428,39 @@ class WebApproval:
         # what makes this visible and that ordering is the point.
         await self._session.flush()
 
+        # NOTHING is appended to `pending` here.
+        #
+        # It used to be, and that was a bug the user saw every time
+        # they clicked Approve: `pending` is what the API returns as
+        # `approvals_required`, so an APPROVED call was reported as one
+        # the agent "needed permission for" and the chat showed
+        # "Nothing was changed in your accounts" underneath a tool that
+        # had just run. Only a refusal belongs in that list, and
+        # whether this is one is not known until the answer arrives -
+        # so it is recorded in request(), below.
+
+        return record
+
+    def _refused(self, record: PendingApproval, status: str) -> None:
+        """
+        Record a call that was asked about and did not get a yes.
+
+        Only refusals reach `pending`, and each carries WHY. The API
+        returns this list as `approvals_required`, and the chat renders
+        one sentence per status - "you denied this", "this expired" -
+        so the screen says what actually happened rather than one
+        vague message covering three different events.
+        """
+
         self.pending.append(
             ApprovalRecord(
                 tool_name=record.tool_name,
                 operation=record.operation,
                 risk_level=record.risk_level,
                 arguments=dict(record.arguments),
+                status=status,
             )
         )
-
-        return record
 
     async def _still_permitted(self, tool: ToolDefinition) -> bool:
         """

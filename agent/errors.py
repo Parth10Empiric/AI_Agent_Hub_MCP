@@ -58,7 +58,25 @@ class ErrorCode(str, Enum):
     TOOL_NOT_AVAILABLE = "tool_not_available"
     INVALID_ARGUMENTS = "invalid_arguments"
     PERMISSION_DENIED = "permission_denied"
+
+    # THREE CODES, NOT ONE, and the distinction is for the human.
+    #
+    # All three end the same way - the call did not run - but they are
+    # different events, and a UI that merges them tells people things
+    # that are not true:
+    #
+    #   APPROVAL_DENIED       a person read the arguments and said no
+    #   APPROVAL_EXPIRED      the question was asked and never answered
+    #   APPROVAL_UNAVAILABLE  there was nobody to ask (a plain POST, a
+    #                         CLI, a scheduled run)
+    #
+    # Merged, someone who clicked Deny is told "there was nobody to
+    # answer", and someone whose scheduled job stalled is told they
+    # refused something they never saw. Each needs a different next
+    # step, so each gets its own code.
     APPROVAL_DENIED = "approval_denied"
+    APPROVAL_EXPIRED = "approval_expired"
+    APPROVAL_UNAVAILABLE = "approval_unavailable"
 
     # OUR limit, not the remote service's (Phase 5.7).
     #
@@ -182,6 +200,16 @@ RECOVERY_HINTS: dict[ErrorCode, str] = {
         "The user declined this action. Do not retry it. Ask what "
         "they would like to do instead."
     ),
+    ErrorCode.APPROVAL_EXPIRED: (
+        "The user was asked to confirm this and did not answer in "
+        "time. Do not retry it. Say that the request timed out and "
+        "offer to try again."
+    ),
+    ErrorCode.APPROVAL_UNAVAILABLE: (
+        "This action needs a person to confirm it and nobody could be "
+        "asked. Do not retry it. Tell the user to ask again in the "
+        "chat, where the confirmation prompt can appear."
+    ),
     ErrorCode.AUTHENTICATION_FAILED: (
         "The connection to this service is not authenticated. Do not "
         "retry. Tell the user they need to reconnect the service."
@@ -276,6 +304,41 @@ class ToolError:
             "details": self.details,
         }
 
+    @property
+    def detail(self) -> str:
+        """
+        What the REMOTE SERVICE said, in its own words.
+
+        Our `message` is a category ("GitHub rejected the request
+        because the supplied data is invalid"). The service's message
+        is the part that says how to fix it:
+
+            "Query must include 'is:issue' or 'is:pull-request'"
+
+        Empty when the failure was ours, or when the service said
+        nothing useful.
+        """
+
+        details = self.details
+
+        if not isinstance(details, dict):
+            return ""
+
+        message = details.get("message")
+
+        if not isinstance(message, str):
+            return ""
+
+        message = message.strip()
+
+        if not message or message == self.message:
+            return ""
+
+        # Bounded: this goes into the model's context on every failure,
+        # and a service that returns a wall of text should not be able
+        # to spend the whole budget.
+        return message[:300]
+
     def to_tool_payload(self) -> dict[str, Any]:
         """
         The JSON we hand back to the LLM as the tool result.
@@ -284,15 +347,37 @@ class ToolError:
         shape your MCP tools already use, so the model sees one
         consistent contract whether the failure came from GitHub, from
         the network, or from our own permission check.
+
+        `detail` CARRIES THE SERVICE'S OWN MESSAGE, and leaving it out
+        was a real and expensive bug.
+
+        GitHub refused a search with "Query must include 'is:issue' or
+        'is:pull-request'" - a complete set of instructions for fixing
+        the call. That sentence was parsed, stored on the execution
+        record, and then dropped here. The model was told only "the
+        supplied data is invalid", could not know WHAT was invalid, and
+        gave up on a task it was one corrected argument away from
+        finishing.
+
+        The agent loop exists to let a model recover from a failed
+        call. It cannot recover from an error that does not say what
+        went wrong.
         """
+
+        error: dict[str, Any] = {
+            "type": self.code.value,
+            "message": self.message,
+            "hint": self.hint,
+        }
+
+        detail = self.detail
+
+        if detail:
+            error["detail"] = detail
 
         return {
             "success": False,
-            "error": {
-                "type": self.code.value,
-                "message": self.message,
-                "hint": self.hint,
-            },
+            "error": error,
         }
 
 

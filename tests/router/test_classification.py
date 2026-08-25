@@ -17,7 +17,7 @@ from tests.tool_fixtures import build_tool_definitions  # noqa: E402
 """
 Tests for Phase 2.2 classification.
 
-These run against the REAL 61 tools parsed out of `services/`, so they
+These run against the REAL tool set parsed out of `services/`, so they
 also act as a safety net: add a new tool whose name the heuristic
 cannot read, and `test_no_tool_falls_through_to_default` fails and
 tells you to add an override.
@@ -132,7 +132,7 @@ def test_unknown_verb_fails_closed_to_write():
 
 
 def test_no_tool_falls_through_to_default():
-    # Every one of the 61 real tools must be classified by an
+    # Every one of the real tools must be classified by an
     # override or the heuristic. A tool landing on "default" means the
     # classifier could not read its name - add an override.
     unclassified = [

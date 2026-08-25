@@ -21,14 +21,39 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-import { ToolPicker, type PickableTool } from "@/components/agents/tool-picker";
 import { UsageMeter } from "@/components/limits/usage-meter";
-import {
-  archiveAgent,
-  getAgentTools,
-  setAgentTools,
-  updateAgent,
-} from "@/lib/api/agents";
+import { archiveAgent, getAgentTools, updateAgent } from "@/lib/api/agents";
+import { getAgentScopes } from "@/lib/api/permissions";
+import { prettyNamespace } from "@/lib/tools";
+import type { ScopeOption } from "@/lib/types";
+
+/**
+ * A scope, in words.
+ *
+ * "github:issue:write" is precise and means nothing to most people.
+ * "Create and change issues on GitHub" is the sentence someone can
+ * actually weigh - and weighing it is the entire point.
+ *
+ * Deliberately the same phrasing as the permissions screen, so a
+ * permission reads identically wherever it appears.
+ */
+function describeScope(option: ScopeOption): string {
+  const verb =
+    option.action === "write"
+      ? "Create and change"
+      : option.action === "admin"
+        ? "Change who can see"
+        : "Read";
+
+  const target =
+    option.resource === "*"
+      ? `anything on ${prettyNamespace(option.service)}`
+      : `${option.resource.replace(/_/g, " ")} on ${prettyNamespace(
+          option.service,
+        )}`;
+
+  return `${verb} ${target}`;
+}
 
 export default function AgentSettingsPage({
   params,
@@ -42,12 +67,23 @@ export default function AgentSettingsPage({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmArchive, setConfirmArchive] = useState(false);
 
   const agent = useQuery({
     queryKey: ["agent-tools", id],
     queryFn: () => getAgentTools(id),
+  });
+
+  /**
+   * The permissions, read-only, on the page the user is already on.
+   *
+   * Same query key as the permissions screen, so granting there and
+   * coming back here shows the new state from cache - no refetch, no
+   * flash of stale permissions.
+   */
+  const scopes = useQuery({
+    queryKey: ["agent-scopes", id],
+    queryFn: () => getAgentScopes(id),
   });
 
   /**
@@ -63,13 +99,6 @@ export default function AgentSettingsPage({
     setName(agent.data.name);
     setDescription(agent.data.description ?? "");
     setPrompt(agent.data.system_prompt);
-    setSelected(
-      new Set(
-        (agent.data.tools ?? [])
-          .filter((t) => t.enabled)
-          .map((t) => t.tool_name),
-      ),
-    );
   }, [agent.data]);
 
   const saveDetails = useMutation({
@@ -85,29 +114,6 @@ export default function AgentSettingsPage({
       queryClient.invalidateQueries({ queryKey: ["agent", id] });
     },
     onError: () => toast.error("Could not save. Try again."),
-  });
-
-  const saveTools = useMutation({
-    mutationFn: () => {
-      // EVERY tool is sent, enabled true or false - not just the ticked
-      // ones. The endpoint is a PUT: the body is the complete new
-      // state, so an omitted tool would be indistinguishable from a
-      // tool this client had never heard of.
-      const payload = Object.fromEntries(
-        (agent.data?.tools ?? []).map((tool) => [
-          tool.tool_name,
-          { enabled: selected.has(tool.tool_name) },
-        ]),
-      );
-
-      return setAgentTools(id, payload);
-    },
-    onSuccess: () => {
-      toast.success("Tools updated");
-      queryClient.invalidateQueries({ queryKey: ["agent-tools", id] });
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-    },
-    onError: () => toast.error("Could not update tools."),
   });
 
   const archive = useMutation({
@@ -134,22 +140,23 @@ export default function AgentSettingsPage({
     );
   }
 
-  // Tools the agent knows about but whose service is no longer
-  // connected. Shown as unavailable rather than hidden, so a user can
-  // see WHY an agent stopped being able to do something.
-  const tools: PickableTool[] = (agent.data.tools ?? []).map((tool) => ({
-    name: tool.tool_name,
-    namespace: tool.namespace,
-    description: tool.description ?? null,
-    operation: tool.operation ?? "read",
-    risk_level: tool.risk_level ?? "safe",
-    read_only: (tool.operation ?? "read") === "read",
-    requires_approval: tool.requires_approval,
-  }));
+  const allTools = agent.data.tools ?? [];
 
-  const unavailable = (agent.data.tools ?? []).filter(
-    (t) => !t.available,
-  ).length;
+  // What the current permissions actually buy, in one number.
+  //
+  // `permitted` is computed by the backend with the same policy the
+  // executor runs - never re-derived here, because two implementations
+  // of a permission rule drift and only one of them is the one that
+  // decides.
+  const allowedCount = allTools.filter((tool) => tool.permitted).length;
+
+  // Tools whose service is no longer connected. Counted, not hidden, so
+  // a user can see WHY an agent stopped being able to do something.
+  const unavailable = allTools.filter((tool) => !tool.available).length;
+
+  const granted = (scopes.data?.available ?? []).filter(
+    (option) => option.granted,
+  );
 
   return (
     <div className="mx-auto max-w-3xl space-y-10">
@@ -202,33 +209,82 @@ export default function AgentSettingsPage({
         </Button>
       </section>
 
-      <section className="space-y-3">
-        <h2 className="font-semibold">Permissions</h2>
+      {/* WHAT THIS AGENT CAN DO - ONE ANSWER, IN ONE PLACE.
 
-        <p className="text-sm text-muted-foreground">
-          Switching a tool on below is only half of it. A tool runs only
-          if it is also covered by a permission - so a write tool ticked
-          here still cannot write until you allow it.
-        </p>
+          There used to be a grid of 108 checkboxes here as well, and it
+          was a second gate on the same question: a ticked tool with no
+          permission behind it silently could not run, so the page
+          needed a warning, a badge and a dialog to explain itself.
 
-        <Button asChild variant="outline">
-          <Link href={`/agents/${id}/permissions`}>
-            Manage permissions
-          </Link>
-        </Button>
-      </section>
-
-      <section className="space-y-4">
+          Nobody curates 108 boxes anyway - they hit "select all" and
+          learn nothing. A permission is one sentence a person can mean
+          ("this agent may read GitHub"), and it keeps meaning the same
+          thing when a new GitHub tool ships next month. So permissions
+          are now the only thing to switch, and this section shows what
+          is switched on. */}
+      <section className="space-y-3" data-testid="permissions-summary">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold">Tools</h2>
+          <h2 className="font-semibold">Permissions</h2>
 
-          <Button
-            onClick={() => saveTools.mutate()}
-            disabled={saveTools.isPending}
-          >
-            {saveTools.isPending ? "Saving..." : "Save tools"}
+          <Button asChild variant="outline" size="sm">
+            <Link href={`/agents/${id}/permissions`}>
+              Manage permissions
+            </Link>
           </Button>
         </div>
+
+        <p className="text-sm text-muted-foreground">
+          What this agent is allowed to do, whatever it is asked. Every
+          tool it has follows from these - there is nothing else to
+          switch on.
+        </p>
+
+        {scopes.isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : granted.length === 0 ? (
+          <Alert data-testid="no-permissions-warning">
+            <AlertDescription>
+              This agent has no permissions, so it cannot do anything
+              yet. Open <strong>Manage permissions</strong> and switch on
+              at least one.
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <>
+            <ul className="divide-y rounded-lg border">
+              {granted.map((option) => (
+                <li
+                  key={option.scope}
+                  className="flex items-center gap-3 px-4 py-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {describeScope(option)}
+                    </p>
+                    <p className="mt-0.5 font-mono text-xs text-muted-foreground">
+                      {option.scope}
+                    </p>
+                  </div>
+
+                  <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                    {option.tool_count}{" "}
+                    {option.tool_count === 1 ? "tool" : "tools"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+
+            {/* The bottom line, after de-duplicating tools that more
+                than one permission covers. Two permissions of "7 tools"
+                do not make 14. */}
+            <p className="text-sm text-muted-foreground">
+              <strong className="tabular-nums text-foreground">
+                {allowedCount}
+              </strong>{" "}
+              of {allTools.length} tools are available to this agent.
+            </p>
+          </>
+        )}
 
         {unavailable > 0 && (
           <Alert>
@@ -238,18 +294,11 @@ export default function AgentSettingsPage({
             </AlertDescription>
           </Alert>
         )}
-
-        <ToolPicker
-          tools={tools}
-          selected={selected}
-          onChange={setSelected}
-        />
       </section>
 
       {/* The full meters live here rather than in the chat, where
           only the tightest one appears. This is the page someone opens
-          when they want to know WHY, and it is next to the tool list
-          that explains what spends the budget. */}
+          when they want to know WHY. */}
       <section className="border-t pt-6">
         <UsageMeter agentId={id} />
       </section>

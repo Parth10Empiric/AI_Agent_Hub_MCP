@@ -976,3 +976,501 @@ class GoogleDriveService:
                 f"Failed to create permission: {exc}"
             ) from exc
         
+
+    # =================================================================
+    # TRASH - THE REVERSIBLE HALF OF DELETING
+    # =================================================================
+    #
+    # Drive has two different deletes and only one of them is
+    # survivable:
+    #
+    #   trash_file   moves it to the bin. Recoverable for 30 days.
+    #   delete_file  erases it immediately. Nothing to recover.
+    #
+    # Only the second existed here, so "delete that file" had exactly
+    # one meaning and it was the unrecoverable one. Adding the
+    # reversible option is what lets an agent do what was asked
+    # without doing something that cannot be taken back.
+
+    def trash_file(self, file_id: str) -> dict[str, Any]:
+        """Move a file to the bin, where it can be restored."""
+
+        try:
+            service = self._get_service()
+
+            result = (
+                service.files()
+                .update(
+                    fileId=file_id,
+                    body={"trashed": True},
+                    fields="id,name,trashed",
+                )
+                .execute()
+            )
+
+            return {
+                "id": result["id"],
+                "name": result.get("name"),
+                "trashed": result.get("trashed", True),
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to trash file: {exc}"
+            ) from exc
+
+    def restore_file(self, file_id: str) -> dict[str, Any]:
+        """Restore a file from the bin."""
+
+        try:
+            service = self._get_service()
+
+            result = (
+                service.files()
+                .update(
+                    fileId=file_id,
+                    body={"trashed": False},
+                    fields="id,name,trashed",
+                )
+                .execute()
+            )
+
+            return {
+                "id": result["id"],
+                "name": result.get("name"),
+                "trashed": result.get("trashed", False),
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to restore file: {exc}"
+            ) from exc
+
+    def list_trash(
+        self,
+        page_size: int = 50,
+    ) -> GoogleDriveSearchResult:
+        """List the files currently in the bin."""
+
+        try:
+            service = self._get_service()
+
+            response = (
+                service.files()
+                .list(
+                    q="trashed = true",
+                    pageSize=max(1, min(page_size, 1000)),
+                    fields=(
+                        "files(id,name,mimeType,"
+                        "modifiedTime,webViewLink)"
+                    ),
+                )
+                .execute()
+            )
+
+            files = [
+                GoogleDriveFile(
+                    id=item["id"],
+                    name=item["name"],
+                    mime_type=item["mimeType"],
+                    modified_time=item.get("modifiedTime"),
+                    web_view_link=item.get("webViewLink"),
+                )
+                for item in response.get("files", [])
+            ]
+
+            return GoogleDriveSearchResult(
+                files=files,
+                total=len(files),
+            )
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to list trash: {exc}"
+            ) from exc
+
+    def empty_trash(self) -> dict[str, Any]:
+        """Permanently erase everything in the bin."""
+
+        try:
+            service = self._get_service()
+
+            service.files().emptyTrash().execute()
+
+            return {"emptied": True}
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to empty trash: {exc}"
+            ) from exc
+
+    # =================================================================
+    # COPY, EXPORT, SHORTCUTS
+    # =================================================================
+
+    def copy_file(
+        self,
+        file_id: str,
+        name: str | None = None,
+        parent_id: str | None = None,
+    ) -> GoogleDriveFile:
+        """Duplicate a file."""
+
+        try:
+            service = self._get_service()
+
+            metadata: dict[str, Any] = {}
+
+            if name:
+                metadata["name"] = name
+
+            if parent_id:
+                metadata["parents"] = [parent_id]
+
+            result = (
+                service.files()
+                .copy(
+                    fileId=file_id,
+                    body=metadata,
+                    fields=(
+                        "id,name,mimeType,"
+                        "modifiedTime,webViewLink"
+                    ),
+                )
+                .execute()
+            )
+
+            return GoogleDriveFile(
+                id=result["id"],
+                name=result["name"],
+                mime_type=result["mimeType"],
+                modified_time=result.get("modifiedTime"),
+                web_view_link=result.get("webViewLink"),
+            )
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to copy file: {exc}"
+            ) from exc
+
+    # Google's own formats hold no bytes to download - a Doc is not a
+    # file, it is a database row. Asking for its content the ordinary
+    # way fails; it has to be EXPORTED into a real format first, and
+    # this is the map from the shorthand a caller will type to the
+    # MIME type the API demands.
+    EXPORT_FORMATS: dict[str, str] = {
+        "pdf": "application/pdf",
+        "txt": "text/plain",
+        "html": "text/html",
+        "rtf": "application/rtf",
+        "csv": "text/csv",
+        "docx": (
+            "application/vnd.openxmlformats-officedocument"
+            ".wordprocessingml.document"
+        ),
+        "xlsx": (
+            "application/vnd.openxmlformats-officedocument"
+            ".spreadsheetml.sheet"
+        ),
+        "pptx": (
+            "application/vnd.openxmlformats-officedocument"
+            ".presentationml.presentation"
+        ),
+    }
+
+    def export_file(
+        self,
+        file_id: str,
+        export_format: str,
+        output_path: str,
+    ) -> dict[str, Any]:
+        """
+        Export a Google Doc, Sheet or Slide to a real file.
+
+        This is the only way to get the contents of a Google-native
+        document out of Drive.
+        """
+
+        import io
+
+        from googleapiclient.http import MediaIoBaseDownload
+
+        wanted = export_format.strip().lower().lstrip(".")
+
+        mime_type = self.EXPORT_FORMATS.get(wanted)
+
+        if mime_type is None:
+            raise GoogleDriveFileOperationError(
+                f"Unsupported export format {export_format!r}. "
+                f"Supported: {', '.join(sorted(self.EXPORT_FORMATS))}."
+            )
+
+        try:
+            service = self._get_service()
+
+            request = service.files().export_media(
+                fileId=file_id,
+                mimeType=mime_type,
+            )
+
+            with io.FileIO(output_path, "wb") as handle:
+
+                downloader = MediaIoBaseDownload(handle, request)
+
+                done = False
+
+                while not done:
+                    _, done = downloader.next_chunk()
+
+            return {
+                "file_id": file_id,
+                "format": wanted,
+                "output_path": output_path,
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to export file: {exc}"
+            ) from exc
+
+    def create_shortcut(
+        self,
+        target_id: str,
+        name: str,
+        parent_id: str | None = None,
+    ) -> GoogleDriveFile:
+        """Create a shortcut pointing at another Drive item."""
+
+        try:
+            service = self._get_service()
+
+            metadata: dict[str, Any] = {
+                "name": name,
+                "mimeType": "application/vnd.google-apps.shortcut",
+                "shortcutDetails": {"targetId": target_id},
+            }
+
+            if parent_id:
+                metadata["parents"] = [parent_id]
+
+            result = (
+                service.files()
+                .create(
+                    body=metadata,
+                    fields=(
+                        "id,name,mimeType,"
+                        "modifiedTime,webViewLink"
+                    ),
+                )
+                .execute()
+            )
+
+            return GoogleDriveFile(
+                id=result["id"],
+                name=result["name"],
+                mime_type=result["mimeType"],
+                modified_time=result.get("modifiedTime"),
+                web_view_link=result.get("webViewLink"),
+            )
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to create shortcut: {exc}"
+            ) from exc
+
+    # =================================================================
+    # ACCOUNT, REVISIONS AND SHARING
+    # =================================================================
+
+    def get_storage_quota(self) -> dict[str, Any]:
+        """How much Drive space is used, and by what."""
+
+        try:
+            service = self._get_service()
+
+            about = (
+                service.about()
+                .get(fields="storageQuota,user")
+                .execute()
+            )
+
+            quota = about.get("storageQuota", {})
+
+            def as_int(value: Any) -> int | None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+
+            limit = as_int(quota.get("limit"))
+            usage = as_int(quota.get("usage"))
+
+            return {
+                "user": about.get("user", {}).get("emailAddress"),
+                "limit_bytes": limit,
+                "usage_bytes": usage,
+                "usage_in_drive_bytes": as_int(
+                    quota.get("usageInDrive")
+                ),
+                "usage_in_trash_bytes": as_int(
+                    quota.get("usageInDriveTrash")
+                ),
+                # Percentages are what a person actually asked for, and
+                # an unlimited account has no limit at all - so this is
+                # None rather than a division by zero.
+                "percent_used": (
+                    round(100 * usage / limit, 1)
+                    if limit and usage is not None and limit > 0
+                    else None
+                ),
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to read storage quota: {exc}"
+            ) from exc
+
+    def list_revisions(
+        self,
+        file_id: str,
+    ) -> dict[str, Any]:
+        """List the saved versions of a file."""
+
+        try:
+            service = self._get_service()
+
+            response = (
+                service.revisions()
+                .list(
+                    fileId=file_id,
+                    fields=(
+                        "revisions(id,modifiedTime,size,"
+                        "lastModifyingUser)"
+                    ),
+                )
+                .execute()
+            )
+
+            return {
+                "file_id": file_id,
+                "revisions": [
+                    {
+                        "id": revision.get("id"),
+                        "modified_time": revision.get("modifiedTime"),
+                        "size": revision.get("size"),
+                        "modified_by": revision.get(
+                            "lastModifyingUser", {}
+                        ).get("displayName"),
+                    }
+                    for revision in response.get("revisions", [])
+                ],
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to list revisions: {exc}"
+            ) from exc
+
+    def update_permission(
+        self,
+        file_id: str,
+        permission_id: str,
+        role: str,
+    ) -> dict[str, Any]:
+        """Change what somebody may do with a file."""
+
+        allowed = {
+            "owner",
+            "organizer",
+            "fileOrganizer",
+            "writer",
+            "commenter",
+            "reader",
+        }
+
+        if role not in allowed:
+            raise GoogleDriveFileOperationError(
+                f"role must be one of: {', '.join(sorted(allowed))}."
+            )
+
+        try:
+            service = self._get_service()
+
+            result = (
+                service.permissions()
+                .update(
+                    fileId=file_id,
+                    permissionId=permission_id,
+                    body={"role": role},
+                    fields="id,type,role,emailAddress",
+                )
+                .execute()
+            )
+
+            return {
+                "id": result.get("id"),
+                "permission_type": result.get("type"),
+                "role": result.get("role"),
+                "email_address": result.get("emailAddress"),
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to update permission: {exc}"
+            ) from exc
+
+    def delete_permission(
+        self,
+        file_id: str,
+        permission_id: str,
+    ) -> dict[str, Any]:
+        """Revoke somebody's access to a file."""
+
+        try:
+            service = self._get_service()
+
+            service.permissions().delete(
+                fileId=file_id,
+                permissionId=permission_id,
+            ).execute()
+
+            return {
+                "file_id": file_id,
+                "revoked_permission_id": permission_id,
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to revoke permission: {exc}"
+            ) from exc
+
+    def list_shared_drives(
+        self,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        """List the shared drives available to this account."""
+
+        try:
+            service = self._get_service()
+
+            response = (
+                service.drives()
+                .list(pageSize=max(1, min(page_size, 100)))
+                .execute()
+            )
+
+            return {
+                "drives": [
+                    {
+                        "id": item.get("id"),
+                        "name": item.get("name"),
+                        "created_time": item.get("createdTime"),
+                    }
+                    for item in response.get("drives", [])
+                ],
+            }
+
+        except HttpError as exc:
+            raise GoogleDriveFileOperationError(
+                f"Failed to list shared drives: {exc}"
+            ) from exc

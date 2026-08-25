@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -13,11 +13,24 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
-import { ToolPicker, type PickableTool } from "@/components/agents/tool-picker";
 import { createAgent, type AgentCreatePayload } from "@/lib/api/agents";
-import { getPlugin, listPlugins } from "@/lib/api/plugins";
+import { listPlugins } from "@/lib/api/plugins";
 
-const STEPS = ["Identity", "Instructions", "Services", "Tools"] as const;
+/**
+ * THREE STEPS, NOT FOUR.
+ *
+ * There used to be a "Tools" step: a grid of ~108 checkboxes, defaulted
+ * to every read tool, that the user scrolled past on their way to
+ * Create. It asked the same question as the permissions screen and gave
+ * a worse answer - ticking a write tool there did nothing, because a
+ * new agent is never seeded with write scopes, and the box went green
+ * anyway.
+ *
+ * So the wizard now stops at the question it can answer honestly:
+ * WHICH SERVICES. Which tools follow from the permissions, and those
+ * are granted deliberately, afterwards, on a screen built for it.
+ */
+const STEPS = ["Identity", "Instructions", "Services"] as const;
 
 const DRAFT_KEY = "agent-hub:new-agent-draft";
 
@@ -26,10 +39,6 @@ interface Draft {
   description: string;
   system_prompt: string;
   plugins: string[];
-  tools: string[];
-  // Whether the user has touched the tool list yet. Before they do, the
-  // selection follows the plugin choice; afterwards their edits win.
-  toolsTouched: boolean;
 }
 
 const EMPTY: Draft = {
@@ -38,8 +47,6 @@ const EMPTY: Draft = {
   system_prompt:
     "You are a helpful assistant. Use the tools available to you to answer questions accurately. If a tool fails, explain what happened instead of guessing.",
   plugins: [],
-  tools: [],
-  toolsTouched: false,
 };
 
 export default function NewAgentPage() {
@@ -59,7 +66,18 @@ export default function NewAgentPage() {
   useEffect(() => {
     try {
       const saved = sessionStorage.getItem(DRAFT_KEY);
-      if (saved) setDraft({ ...EMPTY, ...JSON.parse(saved) });
+
+      if (saved) {
+        // Spread over EMPTY, so a draft saved by the FOUR-step version
+        // of this page still opens: its extra `tools` key is ignored
+        // and any field it lacks falls back to the default.
+        const { name, description, system_prompt, plugins } = {
+          ...EMPTY,
+          ...JSON.parse(saved),
+        };
+
+        setDraft({ name, description, system_prompt, plugins });
+      }
     } catch {
       // Corrupt or unavailable storage is not worth an error. Starting
       // from a blank form is a perfectly good outcome.
@@ -84,69 +102,6 @@ export default function NewAgentPage() {
 
   const plugins = useQuery({ queryKey: ["plugins"], queryFn: listPlugins });
 
-  /**
-   * Fetch the tool list for each chosen service, in parallel.
-   *
-   * useQueries rather than a loop of useQuery, because the number of
-   * queries changes as the user ticks services - and hooks may not be
-   * called conditionally or in a loop of varying length.
-   */
-  const pluginDetails = useQueries({
-    queries: draft.plugins.map((key) => ({
-      queryKey: ["plugin", key],
-      queryFn: () => getPlugin(key),
-    })),
-  });
-
-  /**
-   * Every tool offered by the chosen services, flattened.
-   *
-   * Computed plainly on each render rather than memoised. useQueries
-   * returns a NEW array every render, so a useMemo keyed on it would
-   * recompute every time anyway - all the memo would add is a
-   * dependency list that lies. Flattening ~60 objects is far cheaper
-   * than the bug that lying list would eventually cause.
-   */
-  const availableTools: PickableTool[] = pluginDetails.flatMap((query) =>
-    (query.data?.tools ?? []).map((tool) => ({
-      name: tool.name,
-      namespace: query.data?.key ?? null,
-      description: tool.description,
-      operation: tool.operation,
-      risk_level: tool.risk_level,
-      read_only: tool.read_only,
-      requires_approval: tool.requires_approval,
-    })),
-  );
-
-  /**
-   * Default the selection to every READ tool.
-   *
-   * This is the Phase 3.6 rule mirrored in the UI: reads on, writes
-   * off, so a new agent is safe by default and the user opts in to
-   * anything that changes their accounts.
-   *
-   * Only runs until the user edits the list themselves.
-   */
-  // A stable dependency. `availableTools` is a new array every render,
-  // so depending on it directly would run this effect every render.
-  const readToolNames = availableTools
-    .filter((tool) => tool.read_only)
-    .map((tool) => tool.name)
-    .join(",");
-
-  useEffect(() => {
-    if (draft.toolsTouched || !readToolNames) return;
-
-    const reads = readToolNames.split(",");
-
-    setDraft((d) =>
-      // Compare before setting, or this effect re-triggers itself
-      // forever: setDraft -> re-render -> effect -> setDraft.
-      d.tools.join(",") === readToolNames ? d : { ...d, tools: reads },
-    );
-  }, [readToolNames, draft.toolsTouched]);
-
   const create = useMutation({
     mutationFn: () => {
       const payload: AgentCreatePayload = {
@@ -154,9 +109,10 @@ export default function NewAgentPage() {
         description: draft.description.trim() || null,
         system_prompt: draft.system_prompt.trim(),
         plugins: draft.plugins,
-        tools: Object.fromEntries(
-          draft.tools.map((name) => [name, { enabled: true }]),
-        ),
+
+        // No `tools` key at all. The server writes a row for every tool
+        // the chosen services offer, and what the agent may actually
+        // DO is decided by its scopes - which start as reads only.
       };
 
       return createAgent(payload);
@@ -173,7 +129,6 @@ export default function NewAgentPage() {
     draft.name.trim().length > 0,
     draft.system_prompt.trim().length > 0,
     draft.plugins.length > 0,
-    draft.tools.length > 0,
   ][step];
 
   if (!restored) return <Skeleton className="h-96 w-full" />;
@@ -283,9 +238,6 @@ export default function NewAgentPage() {
                         value === true
                           ? [...draft.plugins, plugin.key]
                           : draft.plugins.filter((k) => k !== plugin.key),
-                      // Changing services changes which tools exist, so
-                      // let the read-only default apply again.
-                      toolsTouched: false,
                     })
                   }
                 />
@@ -310,27 +262,25 @@ export default function NewAgentPage() {
               </AlertDescription>
             </Alert>
           )}
-        </div>
-      )}
 
-      {step === 3 && (
-        <>
-          {pluginDetails.some((q) => q.isLoading) ? (
-            <Skeleton className="h-64 w-full" />
-          ) : (
-            <ToolPicker
-              tools={availableTools}
-              selected={new Set(draft.tools)}
-              onChange={(next) =>
-                setDraft({
-                  ...draft,
-                  tools: [...next],
-                  toolsTouched: true,
-                })
-              }
-            />
+          {/* A NEW AGENT IS GRANTED READS AND NOTHING ELSE.
+
+              "I clicked Create" is not consent to modify somebody's
+              GitHub account, so no write permission is ever seeded
+              (api/scopes.py). Saying so HERE, before the click, beats
+              letting someone discover it when the agent tells them it
+              cannot write. */}
+          {draft.plugins.length > 0 && (
+            <Alert>
+              <AlertDescription>
+                Your agent starts able to <strong>read</strong> these
+                services and change nothing. To let it create or edit
+                things, open <strong>Permissions</strong> after creating
+                it and switch on what you want.
+              </AlertDescription>
+            </Alert>
           )}
-        </>
+        </div>
       )}
 
       {create.error && (

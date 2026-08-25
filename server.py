@@ -23,7 +23,7 @@ def main():
     #
     # It reads the caller's credentials out of the MCP request metadata
     # and puts them in ContextVars before the tool runs, so each of the
-    # 61 tools talks to the account of whoever asked - without any of
+    # 161 tools talks to the account of whoever asked - without any of
     # them knowing that per-user credentials exist.
     #
     # Registered here rather than in the four error decorators because
@@ -36,9 +36,11 @@ def main():
 
     if env_credentials_allowed():
         logger.warning(
-            "Environment credentials are ENABLED: a request with no "
-            "credentials will use the tokens in .env. Correct for local "
-            "development; set MCP_ENVIRONMENT=production to refuse."
+            "Environment credentials are ENABLED: an ANONYMOUS request "
+            "with no credentials will use the tokens in .env. Correct "
+            "for local development; set MCP_ENVIRONMENT=production to "
+            "refuse. A request made on a USER's behalf never falls back "
+            "here in any environment - see core.tenancy._resolve."
         )
 
     register_github_tools(mcp)

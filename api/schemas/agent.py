@@ -36,6 +36,27 @@ class AgentToolRead(BaseModel):
     risk_level: str | None = None
     available: bool = True
 
+    # --- What the agent may actually do (Phase 5.1) ------------------
+    #
+    #   permitted        does a granted scope cover this tool?
+    #   required_scopes  which grants would cover it?
+    #
+    # COMPUTED HERE, NOT IN THE BROWSER. The frontend re-deriving "is
+    # this covered?" from a scope list is a second implementation of
+    # the permission rule, and two implementations of a security rule
+    # drift. This one calls the same policy the executor does.
+    #
+    # `permitted` answers ONLY the scope half, deliberately - it ignores
+    # `enabled`. That used to preserve a distinction the checkbox grid
+    # needed ("ticked but not allowed" versus "not ticked"). The grid is
+    # gone and every row now defaults open, so the two answers coincide
+    # in practice; the separation stays because `enabled` remains an API
+    # lever, and a UI asking "can this run?" should be told about the
+    # permission, which the user controls, not about a flag they have no
+    # screen for.
+    permitted: bool = True
+    required_scopes: list[str] = Field(default_factory=list)
+
 
 class AgentToolWrite(BaseModel):
     """One tool setting, as a client sends it."""

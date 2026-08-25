@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.engine import AgentEngine
@@ -18,13 +19,14 @@ from api.approvals import (
     DeferredApproval,
     WebApproval,
 )
-from api.context import build_llm_messages
+from api.context import build_llm_messages, wants_fresh_data
 from api.db.models import (
     Agent,
     AgentScope,
     AgentTool,
     Conversation,
     Message,
+    PluginConnection,
     ToolExecution,
 )
 from api.anomaly import detector
@@ -43,7 +45,7 @@ from api.schemas.chat import (
     RoutingSummary,
 )
 from api.schemas.conversation import ExecutionRead
-from api.services import conversation_service
+from api.services import agent_service, conversation_service
 from api.services.conversation_service import ConversationNotFound
 
 
@@ -112,6 +114,7 @@ def _started_at(record) -> datetime:
 
 async def _load_turn_context(
     session: AsyncSession,
+    engine: AgentEngine,
     user_id: uuid.UUID,
     conversation_id: uuid.UUID,
 ) -> TurnContext:
@@ -151,6 +154,16 @@ async def _load_turn_context(
 
     if agent.is_archived:
         raise AgentUnavailable("This agent has been archived.")
+
+    # Pick up tools that shipped after this agent was created.
+    #
+    # Without this the turn would be routed over a frozen catalogue:
+    # the agent holds "github:*:read", the user asks about releases,
+    # and github_list_releases is simply not in the candidate set
+    # because no row exists for it. The model then explains it has no
+    # such tool, which reads as a capability gap rather than a stale
+    # table. Idempotent, and a no-op once the agent is current.
+    await agent_service.sync_agent_tools(session, engine, [agent.id])
 
     # Two things from one query: which tools are on, and which of them
     # this agent wants a human to confirm.
@@ -200,6 +213,146 @@ async def _load_turn_context(
         granted=granted,
         approval_overrides=approval_overrides,
     )
+
+
+async def _credentials_changed_at(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+) -> datetime | None:
+    """
+    When this user last connected, reconnected or revoked a service.
+
+    PHASE 5.8. Every tool result stored before that moment was fetched
+    with credentials that are no longer in use, so it may describe a
+    completely different account - and nothing in the conversation says
+    so, because reconnecting happens on the settings page, not in the
+    chat.
+
+    From a real session: the user swapped their GitHub token, asked for
+    their repositories, and the agent answered from a list fetched
+    under the OLD token without calling anything. It then "explained"
+    the difference by inventing a repository, because the user had said
+    the token changed and an answer that agrees is more probable than
+    one that admits it did not look.
+
+    One MAX over a small indexed table, once per turn. The alternative
+    - a cache keyed by credential version - is faster and has one more
+    thing that can be stale, which is the bug being fixed.
+    """
+
+    return await session.scalar(
+        select(func.max(PluginConnection.updated_at)).where(
+            PluginConnection.user_id == user_id
+        )
+    )
+
+
+# How many blocked capabilities to name. Enough to be actionable, few
+# enough that the notice cannot become the longest thing in the prompt.
+MAX_BLOCKED_REPORTED = 3
+
+BLOCKED_NOTICE = """\
+[runtime notice] These tools match this request but were withheld from \
+you: {blocked}. They EXIST on this server - you are simply not \
+permitted to use them right now. Do not tell the user the capability \
+does not exist or that no such tool exists. If you cannot answer \
+without them, say plainly which permission is missing and that they \
+can grant it in the agent's settings.\
+"""
+
+
+async def _blocked_capabilities(
+    engine: AgentEngine,
+    content: str,
+    previous: tuple[str, ...],
+    policy: DatabaseScopePolicy,
+    enabled: set[str],
+    decision,
+) -> list[str]:
+    """
+    Relevant tools this agent was NOT allowed to be offered.
+
+    THE FAILURE THIS COMES FROM
+
+        user   "list out all github repo name"
+        agent  "I don't have a tool available that can list all GitHub
+                repositories... none of them can enumerate the list of
+                repos under your account."
+
+    Every word of that was true from where the model was standing, and
+    completely misleading. `github_list_repositories` exists, is
+    switched on for that agent, and was ranked third by the router. It
+    was removed before the model ever saw it, because the agent had
+    been granted `github:*:admin`, `github:repository:write` and
+    `github:workflow_run:read` - and no read scope for repositories.
+
+    So the user reads "this product cannot list repositories" when the
+    truth is "you have not ticked one box". They then debug the router,
+    which is working perfectly.
+
+    THE RULE THIS RESTORES
+
+    A permission system must be able to say NO OUT LOUD. Silently
+    removing a capability and letting the agent improvise an
+    explanation is the worst of both: the user is not told what to fix,
+    and the model invents a reason - which is how "I have no tool for
+    that" becomes a statement about the product rather than about a
+    checkbox.
+
+    HOW RELEVANCE IS DECIDED
+
+    By routing again over the tools that FAILED the policy, and keeping
+    the ones that outscore the weakest tool that was actually offered.
+    That is a precise definition of what was lost: "this would have
+    been in your toolset if it were permitted". It reuses the ranking
+    the router already does instead of inventing a second, weaker
+    notion of relevance that could drift from it.
+
+    Costs one extra routing pass, roughly 15ms - the query embedding is
+    already cached from the first pass, so no network call.
+    """
+
+    # In fallback the router already widened as far as it goes, and
+    # every candidate carries score 0.0 - so "outscores the weakest
+    # offered tool" would be true of everything.
+    if decision.fallback_used or not decision.candidates:
+        return []
+
+    floor = min(candidate.score for candidate in decision.candidates)
+
+    blocked = await asyncio.to_thread(
+        engine.route,
+        content,
+        previous_namespaces=previous or None,
+
+        # The exact inverse of the first pass. Rank what was refused.
+        allow=lambda definition: not policy.permits(definition),
+    )
+
+    reported: list[str] = []
+
+    for candidate in blocked.candidates:
+
+        if len(reported) >= MAX_BLOCKED_REPORTED:
+            break
+
+        if candidate.tool is None or candidate.score < floor:
+            continue
+
+        # WHICH gate refused it, because the two need different
+        # sentences from the user's point of view: one is a checkbox on
+        # this agent, the other is a permission grant.
+        if candidate.tool_name not in enabled:
+            reason = "switched off in this agent's tool settings"
+        else:
+            reason = (
+                "needs the permission "
+                + " or ".join(candidate.tool.permissions)
+            )
+
+        reported.append(f"{candidate.tool_name} ({reason})")
+
+    return reported
 
 
 async def _previous_namespaces(
@@ -273,7 +426,9 @@ async def send_message(
     decides what is ALLOWED, and both apply.
     """
 
-    context = await _load_turn_context(session, user_id, conversation_id)
+    context = await _load_turn_context(
+        session, engine, user_id, conversation_id
+    )
 
     conversation = context.conversation
     agent = context.agent
@@ -326,12 +481,66 @@ async def send_message(
     # model see the question repeated.
     history = [m for m in history if m.id != user_message.id]
 
-    built = build_llm_messages(agent.system_prompt, history)
+    # PHASE 5.8: two reasons to withhold what we already fetched.
+    #
+    #   the user asked for fresh data   -> drop every stored result
+    #   the credentials changed since   -> drop the ones from before
+    #
+    # Both are decided HERE, not by the model. The model's own
+    # judgement is exactly what failed: handed a complete answer with
+    # no age on it, re-reading beat re-calling every time. Taking the
+    # payload away is a decision it cannot overrule.
+    refresh = wants_fresh_data(content)
+
+    built = build_llm_messages(
+        agent.system_prompt,
+        history,
+        drop_tool_results=refresh,
+        invalid_before=await _credentials_changed_at(session, user_id),
+    )
 
     # --- 4. route ---------------------------------------------------
+    #
+    # The policy is built BEFORE routing, not after, because routing
+    # now uses it. See `usable` below.
+    policy = DatabaseScopePolicy(granted, enabled, agent.name)
+
+    def usable(definition) -> bool:
+        """Could this tool actually run for this agent?"""
+
+        return policy.permits(definition)
+
     previous = await _previous_namespaces(session, conversation_id)
 
-    decision = engine.route(content, previous_namespaces=previous or None)
+    # IN A THREAD, because routing is no longer purely CPU-bound.
+    #
+    # `route` is synchronous, and since the semantic layer was switched
+    # on it can make one blocking HTTP call to embed the query - about
+    # 150ms, on the queries where keyword scoring came up short. Called
+    # directly from this async handler that does not slow one turn
+    # down; it stalls the event loop, and with it every other user's
+    # request, MCP read and SSE heartbeat.
+    #
+    # The same rule that made agent/loop.py insist on AsyncClient. A
+    # synchronous call that only SOMETIMES touches the network is the
+    # more dangerous kind, because it behaves perfectly in testing.
+    decision = await asyncio.to_thread(
+        engine.route,
+        content,
+        previous_namespaces=previous or None,
+
+        # Spend the tool budget only on tools that could run.
+        #
+        # This used to be applied to the RESULT instead, and the
+        # difference is not cosmetic. A turn asking to file GitHub
+        # issues and post a Slack summary pooled Google Drive on the
+        # word "file", gave it its guaranteed per-service quota, and
+        # then discarded all four of those tools because the agent
+        # holds no Drive scope - so the model was handed 12 tools where
+        # the budget allowed 16, and the four it lost were the ones it
+        # needed.
+        allow=usable,
+    )
 
     if on_event is not None:
         on_event(
@@ -346,22 +555,27 @@ async def send_message(
 
     # --- 5. relevant AND allowed ------------------------------------
     #
-    # ONE policy object, used for two different jobs:
+    # ONE policy object, used for three different jobs:
     #
-    #   here      to decide what to OFFER the model     (efficiency)
-    #   in the    to decide what may actually RUN       (security)
+    #   in step 4  to decide what is worth RANKING      (budget)
+    #   here       to decide what to OFFER the model    (efficiency)
+    #   in the     to decide what may actually RUN      (security)
     #   executor
     #
-    # Building it once means the two can never disagree. If they did,
+    # Building it once means the three can never disagree. If they did,
     # the model would be shown a tool that is refused the moment it
     # asks for it - a whole wasted round and a confusing answer.
     #
-    # Note which of the two is the control. Routing is advisory and a
+    # Note which of them is the control. Routing is advisory and a
     # crafted message can influence what looks relevant; this list is
     # only a suggestion. The gate that holds is inside the executor,
     # below the model, on the tool it actually requested.
-    policy = DatabaseScopePolicy(granted, enabled, agent.name)
-
+    #
+    # This second pass is now belt and braces rather than the only
+    # check - the router was given the same predicate. It stays because
+    # a tool can be in the registry and absent from `_mcp_tools_by_name`
+    # after a reconnect, and because a filter that is never wrong is
+    # cheap to keep and expensive to have removed by mistake.
     def offerable(mcp_tool) -> bool:
         """Is this tool both enabled and covered by a granted scope?"""
 
@@ -374,6 +588,39 @@ async def send_message(
         for tool in engine.select_mcp_tools(decision)
         if offerable(tool)
     ]
+
+    # --- 5b. and say what was withheld ------------------------------
+    #
+    # A gate that removes a capability silently makes the model invent
+    # the reason, and it invents the wrong one - "no such tool exists"
+    # rather than "you have not granted me that permission". See
+    # `_blocked_capabilities` for the transcript this comes from.
+    #
+    # This tells the model what it may NOT do. It does not make
+    # anything callable: the tools named here are absent from
+    # `mcp_tools`, absent from `allowed_tools` in the loop, and would
+    # still be refused by the executor if the model asked for one
+    # anyway. Naming a locked door is not a key.
+    blocked = await _blocked_capabilities(
+        engine,
+        content,
+        previous,
+        policy,
+        enabled,
+        decision,
+    )
+
+    turn_messages = list(built.messages)
+
+    if blocked:
+        turn_messages.append(
+            {
+                "role": "user",
+                "content": BLOCKED_NOTICE.format(
+                    blocked="; ".join(blocked)
+                ),
+            }
+        )
 
     # --- 6. run -----------------------------------------------------
     #
@@ -436,20 +683,44 @@ async def send_message(
         budget=budget,
     )
 
-    def widen(already_offered: set[str], _query: str = content) -> list:
+    def widen(already_offered: set[str], query: str = content) -> list:
         """
         Second-chance retrieval, restricted to allowed tools.
 
-        The loop calls this when every tool in a round failed. Without
-        the same policy filter it would happily widen into tools this
-        agent was never granted, and the executor would then refuse
-        every one of them - wasting a whole round.
+        Called two ways, and the difference is who noticed the problem:
+
+          the loop, automatically   every tool in a round failed, so
+                                    the first pick could not do the job
+
+          the model, deliberately   it called `find_tools`, because it
+                                    has now seen a result and knows
+                                    what it needs next
+
+        The second is the important one. Routing happens before the
+        turn, from the user's sentence, and no amount of tuning lets it
+        predict the tool needed for a step whose ARGUMENTS do not exist
+        yet - "read the file that the listing turns up" cannot be
+        routed before the listing runs. `query` is what the model asks
+        for; it defaults to the user's message for the automatic case,
+        which has nobody to write a better one.
+
+        `allow=usable` is not optional in either case. Without the same
+        policy filter this would happily widen into tools the agent was
+        never granted, and the executor would then refuse every one of
+        them - a wasted round, and a model told it has a capability it
+        does not. Widening what the model can SEE must never widen what
+        it can DO.
         """
 
         return [
             tool
             for tool in engine.select_mcp_tools(
-                engine.route(_query, exclude=already_offered, top_k=8)
+                engine.route(
+                    query,
+                    exclude=already_offered,
+                    top_k=8,
+                    allow=usable,
+                )
             )
             if offerable(tool)
         ]
@@ -468,7 +739,7 @@ async def send_message(
         session=ScopedSession(provider, str(user_id), resolver=resolver),
         mcp_tools=mcp_tools,
         user_message=content,
-        messages=list(built.messages),
+        messages=turn_messages,
         executor=executor,
         model=agent.model,
         verbose=False,
@@ -487,6 +758,14 @@ async def send_message(
         "rounds": turn.rounds,
         "escalations": turn.escalations,
         "context_truncated": built.truncated,
+
+        # PHASE 5.8. Both are here so that "why did it call the tool
+        # again?" and "why did it forget?" are answerable from the
+        # stored row, without reconstructing what the user typed.
+        "refresh_forced": built.refresh_forced,
+        "stale_results_dropped": built.invalidated,
+        "blocked_tools": blocked,
+        "tool_searches": turn.tool_searches,
     }
 
     assistant_message = await conversation_service.add_message(
@@ -581,16 +860,22 @@ async def send_message(
             )
             for r in turn.executions
         ],
-        # What needed a human. On the streaming path these were all
-        # actually asked about; on the non-streaming path they were
-        # refused, and this list is how the client finds out why the
-        # agent stopped short.
+        # What needed a human and did not get a yes. ONLY refusals -
+        # an approved call is not in this list, which is what stopped
+        # the chat from printing "nothing was changed in your accounts"
+        # under a tool the user had just approved and watched run.
+        #
+        # Each entry says which refusal it was, because the streaming
+        # and non-streaming paths produce different ones: a human
+        # denying or letting it expire, versus nobody being there to
+        # ask at all.
         approvals_required=[
             ApprovalRequired(
                 tool_name=p.tool_name,
                 operation=p.operation,
                 risk_level=p.risk_level,
                 argument_keys=list(p.arguments),
+                status=p.status,
             )
             for p in approval.pending
         ],

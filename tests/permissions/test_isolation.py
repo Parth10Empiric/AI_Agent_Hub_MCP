@@ -47,8 +47,8 @@ class FakeEngine:
 
     They call exactly one method - get_tools() - plus registry access
     for plugin filtering. Standing up the real engine would spawn the
-    MCP server subprocess and classify 61 tools, which these tests do
-    not need: the fixture registry already IS those 61 tools.
+    MCP server subprocess and classify 161 tools, which these tests do
+    not need: the fixture registry already IS those tools.
     """
 
     def __init__(self) -> None:

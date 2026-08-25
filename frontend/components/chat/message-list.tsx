@@ -4,7 +4,6 @@ import { useEffect, useRef } from "react";
 
 import {
   ApprovalNotice,
-  refusedFromApprovals,
   refusedFromExecutions,
 } from "./approval-notice";
 import { ApprovalRequest } from "@/components/approvals/approval-request";
@@ -90,16 +89,43 @@ export function MessageList({
           <Turn role="assistant">
             <ToolTimeline rows={live.timeline} />
 
-            {/* The turn is parked on this one. Rendered BELOW the
-                timeline so the sequence reads in the order it
-                happened: here is what I have done, here is what I
-                want to do next. */}
-            {live.pendingApproval && (
-              <ApprovalRequest approval={live.pendingApproval} />
-            )}
+            {/* Every question this turn asked, answered or not.
+                Rendered BELOW the timeline so the sequence reads in
+                the order it happened: here is what I have done, here
+                is what I wanted to do next.
+                
+                An ANSWERED one stays on screen showing what was
+                chosen. It used to be removed the instant the server
+                confirmed, so clicking Deny looked like the prompt had
+                simply vanished - no confirmation, and nothing left
+                after a reload. */}
+            {live.approvalRequests.map((entry) => (
+              <ApprovalRequest
+                key={entry.event.approval_id}
+                approval={entry.event}
+                resolvedStatus={entry.status}
+              />
+            ))}
 
+            {/* Refusals that have no card of their own - a tool
+                stopped by its scope is denied below the model and
+                nobody is ever asked about it, so the card list would
+                not mention it at all.
+                
+                Read from the live TIMELINE rather than from
+                `approvals_required`, which is the same source a
+                reloaded conversation uses. One source, so the turn
+                does not change what it says about itself the moment
+                the page is refreshed. */}
             <ApprovalNotice
-              approvals={refusedFromApprovals(live.approvals)}
+              approvals={refusedFromExecutions(
+                live.timeline.map((row) => row.execution),
+              ).filter(
+                (refused) =>
+                  !live.approvalRequests.some(
+                    (entry) => entry.event.tool === refused.tool_name,
+                  ),
+              )}
               agentId={agentId}
             />
 

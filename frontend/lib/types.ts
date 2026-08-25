@@ -33,6 +33,7 @@ export type RegisterRequest = Schemas["RegisterRequest"];
 export type PluginSummary = Schemas["PluginSummary"];
 export type PluginDetail = Schemas["PluginDetail"];
 export type ConnectionRead = Schemas["ConnectionRead"];
+export type ConnectionCheck = Schemas["ConnectionCheck"];
 export type ConnectRequest = Schemas["ConnectRequest"];
 export type ToolSummary = Schemas["ToolSummary"];
 

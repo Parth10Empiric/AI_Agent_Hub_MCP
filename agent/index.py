@@ -11,7 +11,7 @@ from .text import fuzzy_ratio, normalize_token
 The search index (Phase 2.3).
 
 A router that compares every query token against every term of every
-tool is O(tokens x tools x terms). With 61 tools that is survivable;
+tool is O(tokens x tools x terms). With 161 tools that is survivable;
 with the 300+ tools the Agent Hub roadmap plans for, it is not.
 
 This module builds an inverted index once at discovery time, so a
@@ -20,7 +20,7 @@ query only ever scores the handful of tools that could plausibly match.
 Two ideas do all the work here:
 
   1. Inverted index (term -> tools that contain it).
-     Instead of asking "does this tool match?" 61 times, we ask "which
+     Instead of asking "does this tool match?" 161 times, we ask "which
      tools contain a term like this?" once.
 
   2. IDF weighting (inverse document frequency).
@@ -43,6 +43,37 @@ FIELD_WEIGHT_KEYWORD = 0.85
 FIELD_WEIGHT_DESCRIPTION = 0.65
 
 
+# The rarest a term is allowed to be treated as, as a fraction of the
+# corpus.
+#
+# Plain IDF is log(1 + N / (1 + df)). For a term in exactly ONE tool
+# that is log(1 + N/2), which GROWS without limit as the server gains
+# tools - so the more tools you add, the more decisive an incidental
+# word in a single docstring becomes. That is backwards, and it is a
+# real failure rather than a theoretical one:
+#
+#   "...send a short summary with the issue titles and links to
+#    #mcp_test on Slack"
+#
+# The words "title" and "link" are ordinary English, not domain terms.
+# Each happened to appear in exactly one Slack docstring, so IDF made
+# them decisive, and slack_get_user_profile ("...title, status and
+# contact fields") and slack_get_permalink ("...a shareable link...")
+# both outranked slack_send_message - which is the one tool that
+# sentence is actually asking for.
+#
+# Clamping df from below says: below this frequency, we cannot tell
+# "genuinely distinctive" from "somebody's turn of phrase", so stop
+# pretending we can. Expressed as a FRACTION rather than a count so
+# the ceiling is the same at 60 tools and at 600 - the whole point is
+# that growing the server must not silently re-tune the scorer.
+#
+# This does not make rare terms weak. At this floor a distinctive term
+# is still worth roughly twice a term appearing in half the corpus.
+# It only stops one accidental word being worth four of them.
+IDF_FLOOR_FRACTION = 0.15
+
+
 @dataclass(frozen=True, slots=True)
 class TokenExpansion:
     """
@@ -61,6 +92,7 @@ class TokenExpansion:
     token: str
     weight: float
     matches: dict[str, float]
+
 
     @property
     def is_out_of_vocabulary(self) -> bool:
@@ -81,6 +113,7 @@ class ToolIndex:
         "_idf",
         "_postings",
         "_namespaces",
+        "_service_terms",
     )
 
     def __init__(self, tools: list[ToolDefinition]) -> None:
@@ -100,6 +133,7 @@ class ToolIndex:
 
         self._vocabulary: tuple[str, ...] = ()
         self._namespaces: tuple[str, ...] = ()
+        self._service_terms: frozenset[str] = frozenset()
 
         self._build()
 
@@ -113,10 +147,22 @@ class ToolIndex:
 
         namespaces: set[str] = set()
 
+        # Name terms shared by EVERY tool in a namespace, collected per
+        # namespace and intersected below. See `service_terms`.
+        name_terms_by_namespace: dict[str, set[str]] = {}
+
         for tool in self._tools:
 
             if tool.namespace:
                 namespaces.add(tool.namespace)
+
+                shared = name_terms_by_namespace.get(tool.namespace)
+                terms = set(tool.name_terms)
+
+                if shared is None:
+                    name_terms_by_namespace[tool.namespace] = terms
+                else:
+                    shared &= terms
 
             # A term is counted ONCE per tool even if it appears in the
             # name and the description. Otherwise a tool that repeats a
@@ -130,18 +176,30 @@ class ToolIndex:
 
         total_documents = max(len(self._tools), 1)
 
+        # Nothing is treated as rarer than this many documents. See
+        # IDF_FLOOR_FRACTION for why the floor scales with the corpus.
+        frequency_floor = IDF_FLOOR_FRACTION * total_documents
+
         for term, frequency in document_frequency.items():
             # Smoothed IDF. The inner +1 keeps the value finite when a
             # term appears in every document, and the outer +1 keeps it
             # positive so a common term is down-weighted rather than
             # zeroed out entirely.
+            effective = max(float(frequency), frequency_floor)
+
             self._idf[term] = math.log(
-                1.0 + (total_documents / (1.0 + frequency))
+                1.0 + (total_documents / (1.0 + effective))
             )
 
         self._vocabulary = tuple(sorted(document_frequency))
 
         self._namespaces = tuple(sorted(namespaces))
+
+        self._service_terms = frozenset(
+            term
+            for terms in name_terms_by_namespace.values()
+            for term in terms
+        )
 
     # -----------------------------------------------------------------
     # Accessors
@@ -158,6 +216,34 @@ class ToolIndex:
     @property
     def namespaces(self) -> tuple[str, ...]:
         return self._namespaces
+
+    @property
+    def service_terms(self) -> frozenset[str]:
+        """
+        Terms that identify a SERVICE rather than a capability.
+
+        Derived, not listed: a term qualifies when it appears in the
+        name of every single tool of some namespace - "github",
+        "google", "drive", "slack", "calendar". Such a term cannot
+        distinguish two tools of that service from each other, and
+        between services it says exactly what the namespace prior
+        already says.
+
+        Scoring it lexically as well is the same double counting the
+        router already corrects for command verbs, and it gets worse
+        as the server grows: IDF measures rarity across the whole
+        corpus, so every tool added to a service makes that service's
+        own name look more common and therefore less informative.
+        Adding 29 Slack tools measurably pushed Slack's tools down the
+        ranking for the query "check ... slack ... connection" - the
+        service was penalised for having more to offer.
+
+        Because it is computed from the tools themselves, removing
+        tools re-derives it too. Nothing here needs editing when the
+        tool set changes.
+        """
+
+        return self._service_terms
 
     def get(self, tool_name: str) -> ToolDefinition | None:
         return self._by_name.get(tool_name)
@@ -185,7 +271,7 @@ class ToolIndex:
 
         This is the single most expensive step in routing, and it is
         deliberately done ONCE per query rather than once per tool.
-        Scoring 61 tools afterwards is then just dictionary lookups.
+        Scoring 161 tools afterwards is then just dictionary lookups.
 
         fuzzy_ratio is cached, so repeated queries and repeated tokens
         across a conversation cost almost nothing.

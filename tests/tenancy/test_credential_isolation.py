@@ -245,6 +245,61 @@ def test_in_production_a_missing_credential_is_refused():
             os.environ["MCP_ENVIRONMENT"] = previous
 
 
+def test_a_users_request_never_falls_back_to_the_environment():
+    """
+    The leak that survived "development mode".
+
+    MCP_ENVIRONMENT=development switches the .env fallback ON, and that
+    is correct for the CLI. It was NOT correct for a real user whose
+    token failed to resolve: their request carried no credential, fell
+    through to .env, and was served from the OPERATOR's GitHub account.
+    Nothing in the UI said so - the reads simply returned somebody
+    else's repositories.
+
+    The user id is what tells the two apart. The backend sets it on
+    every call it makes on somebody's behalf; the CLI sets nothing. So
+    a request that names a user must fail closed even here.
+    """
+
+    previous = os.environ.get("MCP_ENVIRONMENT")
+
+    os.environ["MCP_ENVIRONMENT"] = "development"
+
+    async def body():
+        middleware = CredentialMiddleware()
+
+        # A real user's request: identified, but with no github
+        # credential - not connected, or the token would not decrypt.
+        return await _call(
+            middleware,
+            {"user_id": "usr_1"},
+            lambda: _proxy().whoami(),
+        )
+
+    try:
+        assert env_credentials_allowed() is True
+
+        try:
+            run(body())
+            raise AssertionError(
+                "a user's request was served from the operator's .env"
+            )
+
+        except MissingCredential:
+            # Fail CLOSED. An error the user can act on - "connect
+            # GitHub" - beats silently browsing somebody else's
+            # account, which looks exactly like success.
+            pass
+
+    finally:
+        if previous is None:
+            os.environ.pop("MCP_ENVIRONMENT", None)
+        else:
+            os.environ["MCP_ENVIRONMENT"] = previous
+
+        reset_cache()
+
+
 def test_development_still_falls_back_to_the_environment():
     previous = os.environ.get("MCP_ENVIRONMENT")
 

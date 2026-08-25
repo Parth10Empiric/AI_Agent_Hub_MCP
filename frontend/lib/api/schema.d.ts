@@ -243,10 +243,23 @@ export interface paths {
         put?: never;
         /**
          * Connect
-         * @description Store an encrypted credential for this service.
+         * @description Check the credential with the service, then store it encrypted.
          *
          *     Reconnecting replaces the credential rather than failing, which is
          *     what a user means when they paste a new token.
+         *
+         *     THREE OUTCOMES, THREE STATUS CODES
+         *
+         *         201  verified, stored, genuinely connected
+         *         422  the service rejected it - the user's token is wrong
+         *         503  we could not ask - our problem, and it may work in a minute
+         *
+         *     422 and 503 are the pair worth being careful about. Both used to be
+         *     201, which is how "hello-world-1234" became a green Connected
+         *     badge. Collapsing them into each other now would be a smaller
+         *     version of the same lie: a rejection tells someone to fix their
+         *     token, and telling them that when GitHub was merely rate limiting
+         *     us sends them to revoke and regenerate a token that was fine.
          */
         post: operations["connect_api_plugins__key__connect_post"];
         /**
@@ -259,6 +272,42 @@ export interface paths {
          *     scoped to the caller.
          */
         delete: operations["disconnect_api_plugins__key__connect_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plugins/{key}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify Connection
+         * @description Re-test a stored credential against the service.
+         *
+         *     Connecting proves a credential worked ONCE. Tokens are revoked on
+         *     the provider's website, expire, get rotated, or belong to an
+         *     account that loses access - and none of that notifies us. This is
+         *     how a user finds out before an agent turn does.
+         *
+         *     200 EVEN WHEN THE TOKEN IS BAD
+         *
+         *     "The check ran and the answer was no" is a successful request with
+         *     a negative result. It also has to be: recording that answer sets
+         *     `status = "revoked"`, and get_db rolls back whenever an endpoint
+         *     raises - so a 4xx here would report the dead token and then discard
+         *     the row that recorded it.
+         *
+         *     503 is reserved for the one case where nothing was learned: the
+         *     service could not be reached. Nothing is written then either.
+         */
+        post: operations["verify_connection_api_plugins__key__verify_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -954,6 +1003,13 @@ export interface components {
              * @default true
              */
             available: boolean;
+            /**
+             * Permitted
+             * @default true
+             */
+            permitted: boolean;
+            /** Required Scopes */
+            required_scopes?: string[];
         };
         /**
          * AgentToolWrite
@@ -1082,7 +1138,18 @@ export interface components {
         };
         /**
          * ApprovalRequired
-         * @description A call that was refused because nobody could confirm it.
+         * @description A call that needed a human and did not get a yes.
+         *
+         *     `status` says which of the three refusals this was, because the UI
+         *     has to word them differently and a single "needed permission"
+         *     message is wrong for two of the three:
+         *
+         *         denied       a person read it and said no
+         *         expired      they were asked and never answered
+         *         unavailable  there was nobody to ask
+         *
+         *     Defaults to "unavailable" so an older client, or a handler that
+         *     does not report a status, keeps the behaviour this field replaced.
          */
         ApprovalRequired: {
             /** Tool Name */
@@ -1093,6 +1160,11 @@ export interface components {
             risk_level: string;
             /** Argument Keys */
             argument_keys?: string[];
+            /**
+             * Status
+             * @default unavailable
+             */
+            status: string;
         };
         /**
          * AuditEntryRead
@@ -1234,6 +1306,24 @@ export interface components {
             account_label?: string | null;
             /** Scopes */
             scopes?: string[];
+        };
+        /**
+         * ConnectionCheck
+         * @description The result of re-testing a stored credential.
+         *
+         *     A RESULT, not an error. "The check ran and the service said no" is
+         *     a successful request whose answer happens to be negative - and it
+         *     has to be, because recording that answer WRITES (status becomes
+         *     "revoked") and an endpoint that raises gets its transaction rolled
+         *     back by api/db/session.get_db. Raising would report the bad token
+         *     and then forget it.
+         */
+        ConnectionCheck: {
+            /** Valid */
+            valid: boolean;
+            /** Detail */
+            detail: string;
+            connection: components["schemas"]["ConnectionRead"];
         };
         /**
          * ConnectionRead
@@ -2243,6 +2333,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_connection_api_plugins__key__verify_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionCheck"];
+                };
             };
             /** @description Validation Error */
             422: {

@@ -54,34 +54,17 @@ export function archiveAgent(id: string): Promise<void> {
   return api<void>(`/api/agents/${id}`, { method: "DELETE" });
 }
 
+/**
+ * The agent, WITH its full tool list.
+ *
+ * Read-only from the UI's point of view now. Nothing on screen edits a
+ * tool row any more - a user grants a scope instead, and each tool's
+ * `permitted` flag says whether their scopes cover it. The PUT endpoint
+ * behind `/tools` still exists for API clients that want the narrow
+ * "hide this one tool" lever; the web app deliberately does not offer
+ * it, because a second gate the user can shut invisibly is what the
+ * checkbox grid got wrong.
+ */
 export function getAgentTools(id: string): Promise<AgentDetail> {
   return api<AgentDetail>(`/api/agents/${id}/tools`);
-}
-
-/**
- * Replace this agent's tool selection.
- *
- * PUT, not PATCH: the request body IS the complete new selection. That
- * matters for a checkbox grid - a partial update has no way to express
- * "this box was UNCHECKED", because an absent key is indistinguishable
- * from a key the client did not know about.
- *
- * `tools` is a MAP keyed by tool name, matching AgentToolsUpdate on the
- * backend - not a list. The map shape makes the key unique by
- * construction, so the request cannot contain the same tool twice with
- * two different answers.
- */
-export type ToolSelection = Record<
-  string,
-  { enabled?: boolean; requires_approval?: boolean | null }
->;
-
-export function setAgentTools(
-  id: string,
-  tools: ToolSelection,
-): Promise<AgentDetail> {
-  return api<AgentDetail>(`/api/agents/${id}/tools`, {
-    method: "PUT",
-    json: { tools },
-  });
 }

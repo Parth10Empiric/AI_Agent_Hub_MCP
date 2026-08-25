@@ -169,8 +169,42 @@ def singularize(token: str) -> str:
         # repositories -> repository
         return token[:-3] + "y"
 
-    if token.endswith(("ches", "shes", "ses", "xes", "zes")):
-        # branches -> branch
+    if token.endswith(("ses", "xes", "zes")):
+        # "-es" or a plain "-s"? Both spellings end the same way, and
+        # guessing wrong invents a resource that does not exist:
+        #
+        #     classes  -> class     the suffix was "es"
+        #     releases -> release   the suffix was "s"
+        #
+        # The discriminator is what stripping "es" leaves behind. A
+        # true "-es" plural is built on a stem that already ended in a
+        # hissing sound - "class", "bus", "box" - which is exactly the
+        # set _PROTECTED_SUFFIXES describes. Anything else was a word
+        # ending in "e" that simply took an "s".
+        #
+        # This is not academic. github_list_releases derived the scope
+        # "github:releas:read" while github_get_release derived
+        # "github:release:read": two scopes for one resource, so a user
+        # who granted one silently failed to grant the other - the
+        # exact failure api.scopes.validate_scope exists to prevent.
+        stem = token[:-2]
+
+        # "zz" not "z", for the same reason as "ss": "sizes" leaves
+        # "siz", which was never a word, while "quizzes" leaves the
+        # doubled consonant that marks a real "-es" plural.
+        if stem.endswith(("ss", "us", "x", "zz")):
+            return stem
+
+        return token[:-1]
+
+    if token.endswith(("ches", "shes")):
+        # branches -> branch, searches -> search
+        #
+        # No such test settles this one: "branches" and "caches" are
+        # spelled alike and stem differently. Left as a flat rule
+        # because every tool here falls in the first group, and a
+        # crude stemmer that is honest about its limits beats a clever
+        # one that is wrong in new places.
         return token[:-2]
 
     if token.endswith("s") and not token.endswith(_PROTECTED_SUFFIXES):
@@ -383,7 +417,29 @@ def fuzzy_ratio(first: str, second: str) -> float:
     if len(shorter) < MIN_FUZZY_LENGTH:
         return 0.0
 
-    if len(shorter) >= 5 and shorter in longer:
+    # Containment, but only when the shared part is most of the word.
+    #
+    # The length test is what stops PROPER NOUNS from routing. Users
+    # type repository names, channel names and file names constantly,
+    # and those are long compounds that swallow ordinary vocabulary:
+    #
+    #     "review" in "applicationreview"      1 word in a repo name
+    #     "issue"  in "issuetrackerprototype"
+    #
+    # Scored at 0.90 - all but an exact match - those lifted every
+    # pull-request-review tool to the top of a request that was about
+    # summarising a repository, purely because the repository was
+    # called Student-Faculty-ApplicationReview-System.
+    #
+    # Requiring the shorter word to be at least half of the longer one
+    # keeps the case this rule was written for ("commit" in
+    # "precommit", "config" in "configs") and drops the case where a
+    # real word is merely a fragment of a name.
+    if (
+        len(shorter) >= 5
+        and shorter in longer
+        and len(shorter) * 2 >= len(longer)
+    ):
         return SCORE_CONTAINED
 
     budget = edit_budget(len(longer))

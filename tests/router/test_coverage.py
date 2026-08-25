@@ -29,7 +29,7 @@ and three things went wrong:
 
   2. That one tool was google_calendar_freebusy, which needs three
      arguments nobody supplied - because the word "check" appears in
-     its docstring and nowhere else in 61 tools, so IDF treated a
+     its docstring and nowhere else in the corpus, so IDF treated a
      generic command verb as decisive evidence.
 
   3. google_drive_search_files failed on page_size='1' - the model sent

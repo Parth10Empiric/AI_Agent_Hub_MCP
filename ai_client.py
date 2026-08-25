@@ -8,6 +8,7 @@ from agent.engine import AgentEngine
 from agent.loop import AgentTurn, run_agent
 from agent.permissions import ConsoleApproval
 from agent.routing import RoutingDecision
+from agent.untrusted import DATA_FRESHNESS
 
 from ollama import AsyncClient, ResponseError
 
@@ -27,7 +28,24 @@ SYSTEM_PROMPT = (
     "conversation.\n"
     "When the user refers to something such as 'it', 'them', "
     "'those issues', 'that repository', or 'the previous result', "
-    "use the conversation history to resolve the reference."
+    "use the conversation history to resolve the reference.\n\n"
+
+    # PHASE 5.8, and it sits directly after the rule above because the
+    # two pull in opposite directions and the model has to hold both.
+    #
+    # "Use the conversation history to resolve the reference" is about
+    # what the user MEANT - "that repository" is the one from two
+    # messages ago. It is not permission to reuse what the tool
+    # RETURNED about it. Left alone, the model reads the first rule as
+    # licence to answer any repeated question from the transcript, and
+    # a stale answer is indistinguishable from a fresh one.
+    #
+    # The web path gets this through api/context.py, which also removes
+    # the stale payloads outright. The CLI keeps its whole transcript
+    # in memory and has no equivalent, so here the prompt is the only
+    # defence - which is exactly why the timestamps in every
+    # [tool_result] block matter: this rule is unusable without them.
+    + DATA_FRESHNESS
 )
 
 

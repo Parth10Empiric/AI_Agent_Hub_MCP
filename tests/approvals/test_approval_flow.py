@@ -272,7 +272,19 @@ def test_approving_wakes_the_turn_and_allows_the_call():
 
             assert result.status == str(ApprovalStatus.APPROVED)
 
-            assert await asyncio.wait_for(task, timeout=5) is True
+            outcome = await asyncio.wait_for(task, timeout=5)
+
+            # Truthy for the executor, and it says WHY - the two are
+            # not the same claim. `bool(outcome)` is what gates the
+            # call; `outcome.status` is what the chat prints.
+            assert bool(outcome) is True
+            assert outcome.status == "approved"
+
+            # An APPROVED call is not a refusal, so it must not appear
+            # in `approvals_required`. It used to, and the chat then
+            # told the user "nothing was changed in your accounts"
+            # directly beneath a tool that had just run.
+            assert approval.pending == []
 
         names = [name for name, _ in events]
 
@@ -357,7 +369,17 @@ def test_denying_stops_the_call():
                     api_db, notifier, user_id, row.id, approved=False
                 )
 
-            assert await asyncio.wait_for(task, timeout=5) is False
+            outcome = await asyncio.wait_for(task, timeout=5)
+
+            assert bool(outcome) is False
+
+            # "denied", NOT "unavailable". A person read the arguments
+            # and said no, and the UI says so in those words.
+            assert outcome.status == "denied"
+
+            assert [record.status for record in approval.pending] == [
+                "denied"
+            ]
 
     if not run_committed(body):
         _skipped("test_denying_stops_the_call")
@@ -379,7 +401,14 @@ def test_timeout_denies_and_marks_the_row_expired():
             )
 
             # DENY ON TIMEOUT, never allow. Silence is not consent.
-            assert await approval.request(CREATE_ISSUE, ARGS) is False
+            outcome = await approval.request(CREATE_ISSUE, ARGS)
+
+            assert bool(outcome) is False
+
+            # "expired", NOT "denied". Nobody refused this - nobody
+            # SAW it, and telling someone they declined a request they
+            # never read is both wrong and impossible to act on.
+            assert outcome.status == "expired"
 
         async with maker() as db:
             row = await db.scalar(
@@ -444,7 +473,14 @@ def test_revoking_the_scope_mid_approval_denies_even_after_approve():
             # Still denied. Consent is not capability: the handler
             # re-QUERIES the grants after waking rather than trusting
             # the snapshot it started with.
-            assert await asyncio.wait_for(task, timeout=5) is False
+            outcome = await asyncio.wait_for(task, timeout=5)
+
+            assert bool(outcome) is False
+
+            # A revoked scope is still a human decision - the user
+            # took the permission away - so it reads as "denied"
+            # rather than as a question nobody answered.
+            assert outcome.status == "denied"
 
         async with maker() as db:
             refreshed = await db.get(PendingApproval, row.id)
@@ -496,7 +532,10 @@ def test_another_user_cannot_resolve_my_approval():
                     pass
 
             # Nobody legitimate answered, so it times out and denies.
-            assert await asyncio.wait_for(task, timeout=5) is False
+            outcome = await asyncio.wait_for(task, timeout=5)
+
+            assert bool(outcome) is False
+            assert outcome.status == "expired"
 
     if not run_committed(body):
         _skipped("test_another_user_cannot_resolve_my_approval")
@@ -618,9 +657,16 @@ def test_deferred_approval_reports_without_executing():
 
     allowed, pending = asyncio.run(body())
 
-    assert allowed is False
+    assert bool(allowed) is False
+
+    # "unavailable": there was nobody to ask. Distinct from "denied",
+    # because a scheduled job that stalled must not tell its owner they
+    # refused something they were never shown.
+    assert allowed.status == "unavailable"
+
     assert len(pending) == 1
     assert pending[0].tool_name == "github_create_issue"
+    assert pending[0].status == "unavailable"
 
     # Keys only on this path: nobody is going to be shown these, so
     # the values would be logged and read by no one.

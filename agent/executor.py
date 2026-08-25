@@ -26,6 +26,7 @@ from .permissions import (
     default_approval,
     default_budget,
     default_policy,
+    outcome_status,
 )
 from .registry import ToolRegistry
 from .schemas import ToolDefinition
@@ -95,6 +96,34 @@ DEFAULT_BACKOFF_MAX = 8.0
 # by a synchronized wall of retries and falls over again. This is
 # called a thundering herd, and a little randomness is the whole fix.
 BACKOFF_JITTER = 0.25
+
+
+# How a refused approval is reported, keyed by the handler's status.
+#
+# Three outcomes, three codes, because they need three different next
+# steps from the person reading them:
+#
+#   denied       they said no          -> ask what to do instead
+#   expired      they never answered   -> offer to try again
+#   unavailable  nobody could be asked -> ask again in the chat
+#
+# The message is written for the MODEL, which reads it and explains the
+# situation to the user; the UI reads the CODE, never this text.
+_APPROVAL_REFUSALS: dict[str, tuple[ErrorCode, str]] = {
+    "denied": (
+        ErrorCode.APPROVAL_DENIED,
+        "The user declined this action.",
+    ),
+    "expired": (
+        ErrorCode.APPROVAL_EXPIRED,
+        "The user was asked to confirm this and did not answer in time.",
+    ),
+    "unavailable": (
+        ErrorCode.APPROVAL_UNAVAILABLE,
+        "This action needs a person to confirm it, and there was "
+        "nobody to ask.",
+    ),
+}
 
 
 class ToolExecutor:
@@ -354,18 +383,27 @@ class ToolExecutor:
         # them.
         if self.approval.requires(tool):
 
-            approved = await self.approval.request(tool, arguments)
+            answer = await self.approval.request(tool, arguments)
+
+            approved = bool(answer)
 
             if not approved:
+
+                # WHY the call did not run, not just that it did not.
+                #
+                # A handler that has something more to say returns an
+                # ApprovalOutcome; one that returns a plain False maps
+                # to "denied", which is what this branch always meant
+                # before. See agent/permissions.py.
+                code, message = _APPROVAL_REFUSALS.get(
+                    outcome_status(answer),
+                    _APPROVAL_REFUSALS["denied"],
+                )
+
                 return build(
                     status=ExecutionStatus.DENIED,
                     tool=tool,
-                    error=ToolError(
-                        code=ErrorCode.APPROVAL_DENIED,
-                        message=(
-                            "The user declined this action."
-                        ),
-                    ),
+                    error=ToolError(code=code, message=message),
                     approved=False,
                 )
 

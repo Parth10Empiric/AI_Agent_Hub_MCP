@@ -518,6 +518,460 @@ class SlackService:
     # CLEANUP
     # ========================================================
 
+    # ========================================================
+    # CHANNEL ADMINISTRATION
+    # ========================================================
+
+    def invite_to_channel(
+        self,
+        channel_id: str,
+        user_ids: list[str],
+    ) -> dict[str, Any]:
+        """
+        Add people to a channel.
+
+        Slack wants a comma-separated string, not a JSON array, and
+        silently does nothing useful if handed the wrong shape. The
+        list is the sane interface; the join happens here.
+        """
+
+        if not user_ids:
+            raise ValueError(
+                "At least one user id is required."
+            )
+
+        return self._request(
+            "POST",
+            "/conversations.invite",
+            json={
+                "channel": channel_id,
+                "users": ",".join(user_ids),
+            },
+        )
+
+    def remove_from_channel(
+        self,
+        channel_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/conversations.kick",
+            json={
+                "channel": channel_id,
+                "user": user_id,
+            },
+        )
+
+    def rename_channel(
+        self,
+        channel_id: str,
+        name: str,
+    ) -> dict[str, Any]:
+
+        if not name.strip():
+            raise ValueError("Channel name cannot be empty.")
+
+        return self._request(
+            "POST",
+            "/conversations.rename",
+            json={
+                "channel": channel_id,
+                "name": name.strip(),
+            },
+        )
+
+    def set_channel_topic(
+        self,
+        channel_id: str,
+        topic: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/conversations.setTopic",
+            json={
+                "channel": channel_id,
+                "topic": topic,
+            },
+        )
+
+    def set_channel_purpose(
+        self,
+        channel_id: str,
+        purpose: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/conversations.setPurpose",
+            json={
+                "channel": channel_id,
+                "purpose": purpose,
+            },
+        )
+
+    def list_channel_members(
+        self,
+        channel_id: str,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/conversations.members",
+            params={
+                "channel": channel_id,
+                "limit": max(1, min(limit, 1000)),
+            },
+        )
+
+    def open_conversation(
+        self,
+        user_ids: list[str],
+    ) -> dict[str, Any]:
+        """
+        Open (or find) a direct message conversation.
+
+        This is the missing half of "send a DM". Slack's chat.postMessage
+        needs a CHANNEL id, and a DM's channel does not exist until it
+        has been opened - so without this, sending a direct message is
+        not possible at all, only replying in one that already exists.
+        """
+
+        if not user_ids:
+            raise ValueError(
+                "At least one user id is required."
+            )
+
+        return self._request(
+            "POST",
+            "/conversations.open",
+            json={"users": ",".join(user_ids)},
+        )
+
+    # ========================================================
+    # MESSAGES - SCHEDULING, REACTIONS, PINS
+    # ========================================================
+
+    def send_ephemeral_message(
+        self,
+        channel_id: str,
+        user_id: str,
+        text: str,
+    ) -> dict[str, Any]:
+        """
+        A message only ONE person in the channel can see.
+
+        Useful for answering someone without adding noise for everyone
+        else, and it cannot be edited or deleted afterwards because it
+        was never really posted.
+        """
+
+        return self._request(
+            "POST",
+            "/chat.postEphemeral",
+            json={
+                "channel": channel_id,
+                "user": user_id,
+                "text": text,
+            },
+        )
+
+    def send_thread_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        text: str,
+        broadcast: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Reply inside a thread.
+
+        `broadcast` also pushes the reply to the channel, which is the
+        difference between answering a question and announcing it.
+        """
+
+        return self._request(
+            "POST",
+            "/chat.postMessage",
+            json={
+                "channel": channel_id,
+                "text": text,
+                "thread_ts": thread_ts,
+                "reply_broadcast": broadcast,
+            },
+        )
+
+    def schedule_message(
+        self,
+        channel_id: str,
+        text: str,
+        post_at: int,
+    ) -> dict[str, Any]:
+        """
+        Post a message at a future time.
+
+        `post_at` is a Unix timestamp in SECONDS. Slack rejects a time
+        in the past or more than 120 days out, and the error for the
+        first case ("time_in_past") is easy to hit by passing
+        milliseconds - so the units are checked here where a clear
+        message is possible.
+        """
+
+        if post_at > 10_000_000_000:
+            raise ValueError(
+                "post_at looks like milliseconds. Slack expects "
+                "Unix SECONDS."
+            )
+
+        return self._request(
+            "POST",
+            "/chat.scheduleMessage",
+            json={
+                "channel": channel_id,
+                "text": text,
+                "post_at": post_at,
+            },
+        )
+
+    def list_scheduled_messages(
+        self,
+        channel_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+
+        params: dict[str, Any] = {
+            "limit": max(1, min(limit, 1000)),
+        }
+
+        if channel_id:
+            params["channel"] = channel_id
+
+        return self._request(
+            "GET",
+            "/chat.scheduledMessages.list",
+            params=params,
+        )
+
+    def delete_scheduled_message(
+        self,
+        channel_id: str,
+        scheduled_message_id: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/chat.deleteScheduledMessage",
+            json={
+                "channel": channel_id,
+                "scheduled_message_id": scheduled_message_id,
+            },
+        )
+
+    def get_permalink(
+        self,
+        channel_id: str,
+        message_ts: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/chat.getPermalink",
+            params={
+                "channel": channel_id,
+                "message_ts": message_ts,
+            },
+        )
+
+    def add_reaction(
+        self,
+        channel_id: str,
+        timestamp: str,
+        name: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/reactions.add",
+            json={
+                "channel": channel_id,
+                "timestamp": timestamp,
+                # Slack wants the bare name. ":tada:" is a common and
+                # confusing 500-adjacent failure ("invalid_name").
+                "name": name.strip().strip(":"),
+            },
+        )
+
+    def remove_reaction(
+        self,
+        channel_id: str,
+        timestamp: str,
+        name: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/reactions.remove",
+            json={
+                "channel": channel_id,
+                "timestamp": timestamp,
+                "name": name.strip().strip(":"),
+            },
+        )
+
+    def list_reactions(
+        self,
+        channel_id: str,
+        timestamp: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/reactions.get",
+            params={
+                "channel": channel_id,
+                "timestamp": timestamp,
+            },
+        )
+
+    def pin_message(
+        self,
+        channel_id: str,
+        timestamp: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/pins.add",
+            json={
+                "channel": channel_id,
+                "timestamp": timestamp,
+            },
+        )
+
+    def unpin_message(
+        self,
+        channel_id: str,
+        timestamp: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "POST",
+            "/pins.remove",
+            json={
+                "channel": channel_id,
+                "timestamp": timestamp,
+            },
+        )
+
+    def list_pins(
+        self,
+        channel_id: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/pins.list",
+            params={"channel": channel_id},
+        )
+
+    def search_messages(
+        self,
+        query: str,
+        count: int = 20,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """
+        Full-text search across the workspace.
+
+        Needs a signed-in member's credential rather than an app's -
+        Slack does not expose search to apps at all, and the refusal
+        it sends back is explained by the tool layer rather than
+        passed on raw.
+
+        The word "token" is deliberately absent from the tool-facing
+        docstring: the router indexes those docstrings, and an LLM
+        prompt saying "use minimum tokens" then matched this tool as
+        the most relevant thing on the server.
+        """
+
+        if not query.strip():
+            raise ValueError("Search query cannot be empty.")
+
+        return self._request(
+            "GET",
+            "/search.messages",
+            params={
+                "query": query,
+                "count": max(1, min(count, 100)),
+                "page": max(1, page),
+            },
+        )
+
+    # ========================================================
+    # USERS
+    # ========================================================
+
+    def get_user_presence(
+        self,
+        user_id: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/users.getPresence",
+            params={"user": user_id},
+        )
+
+    def find_user_by_email(
+        self,
+        email: str,
+    ) -> dict[str, Any]:
+        """
+        Look a member up by email address.
+
+        The practical way to turn "message Sam" into a user id when
+        you know their email but not their Slack handle.
+        """
+
+        if "@" not in email:
+            raise ValueError(
+                "A full email address is required."
+            )
+
+        return self._request(
+            "GET",
+            "/users.lookupByEmail",
+            params={"email": email.strip()},
+        )
+
+    def get_user_profile(
+        self,
+        user_id: str,
+    ) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/users.profile.get",
+            params={"user": user_id},
+        )
+
+    def list_usergroups(self) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/usergroups.list",
+        )
+
+    def get_team_info(self) -> dict[str, Any]:
+
+        return self._request(
+            "GET",
+            "/team.info",
+        )
+
     def close(self) -> None:
 
         self.client.close()

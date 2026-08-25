@@ -21,21 +21,21 @@ import {
   safeOperation,
   safeRisk,
 } from "@/lib/tools";
-import type { ApprovalRequired, ExecutionRead } from "@/lib/types";
+import type { ExecutionRead } from "@/lib/types";
 
 /**
- * The shape the notice renders, from either of two sources.
+ * The shape the notice renders.
  *
- * LIVE turn     `approvals_required` on the final `done` event. Carries
- *               `argument_keys`, but exists only while the turn is on
- *               screen.
+ * ONE SOURCE: executions with status `denied`, whether they arrived a
+ * moment ago on the live stream or were read back from the database an
+ * hour later. The live turn used to render from `approvals_required`
+ * instead, so a turn could describe itself one way on screen and a
+ * different way after a refresh - and only one of the two could ever
+ * see a scope refusal, because a scope refusal never reaches the
+ * approval list at all.
  *
- * HISTORY       executions stored with status `denied`. No argument
- *               names, but it is in the database - so it survives a
- *               reload, which is what Phase 4's milestone 5 requires.
- *
- * Normalising both into one shape is why the notice can be rendered
- * from whichever source a given message has.
+ * `approvals_required` is still on the API for clients that cannot
+ * stream; this component simply no longer needs it.
  */
 export interface RefusedCall {
   tool_name: string;
@@ -44,54 +44,79 @@ export interface RefusedCall {
   argument_keys?: string[];
 
   /**
-   * WHY it was refused, and the two answers need different advice.
+   * WHY it was refused. Four answers, four different next steps:
    *
-   *   permission  the agent was never allowed to do this. The user
-   *               fixes it on the permissions screen.
+   *   permission   the agent was never allowed to do this. Fixed on
+   *                the permissions screen.
    *
-   *   approval    the agent IS allowed, but nobody was there to
-   *               confirm. The user fixes it by asking again in the
-   *               chat, where the prompt can appear.
+   *   denied       a person read the arguments and said no. Nothing
+   *                to fix - this is the system working.
    *
-   * Merging them produces the worst possible message: "this needs your
-   * permission" shown to someone who has already granted it, with no
-   * hint of where to look.
+   *   expired      the prompt was shown and nobody answered in time.
+   *                Fixed by asking again.
+   *
+   *   unavailable  the agent IS allowed, but there was nobody to ask
+   *                - a script, the API, a scheduled run. Fixed by
+   *                asking again in the chat.
+   *
+   * Merging any two of these produces a message that is actively
+   * false. Telling someone "there was nobody to answer" about a
+   * request they just clicked Deny on reads as a bug in software that
+   * did exactly what they asked.
    */
-  reason?: "permission" | "approval";
+  reason?: RefusalReason;
+}
+
+export type RefusalReason =
+  | "permission"
+  | "denied"
+  | "expired"
+  | "unavailable";
+
+/**
+ * The refusal reason behind one stored execution.
+ *
+ * READS `type`, NOT `code`.
+ *
+ * ToolError.to_dict() has always serialised the error code under
+ * `type` (agent/errors.py). This function read `code`, got `undefined`
+ * every single time, and fell through to its default - so EVERY
+ * refusal in a reloaded conversation was reported as "nobody was
+ * there to confirm", including scope refusals that never reached a
+ * human and denials the user had made themselves.
+ *
+ * The bug was invisible because the fallback is a plausible sentence.
+ */
+function reasonFromError(error: unknown): RefusalReason {
+  const type = (error as { type?: string } | null)?.type;
+
+  switch (type) {
+    case "permission_denied":
+      return "permission";
+    case "approval_denied":
+      return "denied";
+    case "approval_expired":
+      return "expired";
+    default:
+      return "unavailable";
+  }
 }
 
 /** Denied executions on a stored message, as refused calls. */
 export function refusedFromExecutions(
-  executions: ExecutionRead[] | undefined,
+  executions: (ExecutionRead | undefined)[] | undefined,
 ): RefusedCall[] {
   return (executions ?? [])
-    .filter((execution) => execution.status === "denied")
+    .filter(
+      (execution): execution is ExecutionRead =>
+        execution !== undefined && execution.status === "denied",
+    )
     .map((execution) => ({
       tool_name: execution.tool_name,
       operation: execution.operation,
       risk_level: execution.risk_level,
-      reason:
-        (execution.error as { code?: string } | null)?.code ===
-        "permission_denied"
-          ? ("permission" as const)
-          : ("approval" as const),
+      reason: reasonFromError(execution.error),
     }));
-}
-
-/** `approvals_required` from a live turn, as refused calls. */
-export function refusedFromApprovals(
-  approvals: ApprovalRequired[],
-): RefusedCall[] {
-  return approvals.map((approval) => ({
-    tool_name: approval.tool_name,
-    operation: approval.operation,
-    risk_level: approval.risk_level,
-    argument_keys: approval.argument_keys ?? undefined,
-
-    // This list only ever holds calls that needed a human. A scope
-    // refusal never reaches it - it is denied before anyone is asked.
-    reason: "approval" as const,
-  }));
 }
 
 /**
@@ -136,20 +161,31 @@ export function ApprovalNotice({
 
   if (approvals.length === 0) return null;
 
-  // If ANY of them was a permission refusal, the permission advice is
-  // the one that unblocks the user - so it wins.
-  const blocked = approvals.some((a) => a.reason === "permission");
+  // ONE headline for a mixed list, chosen by which refusal most needs
+  // acting on. A permission refusal wins because it is the only one
+  // the user must go somewhere else to fix; a denial ranks last
+  // because it needs no action at all - it is the system working.
+  const reason = mostActionable(approvals);
+
+  const count = approvals.length;
+  const plural = count === 1 ? "" : "s";
 
   return (
-    <div className="my-3 rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950">
+    <div
+      data-testid="approval-notice"
+      data-reason={reason}
+      className="my-3 rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950"
+    >
       <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-        {approvals.length === 1
-          ? "Your agent needed permission for 1 action"
-          : `Your agent needed permission for ${approvals.length} actions`}
+        {reason === "denied"
+          ? `You declined ${count} action${plural}`
+          : reason === "expired"
+            ? `${count} request${plural} timed out`
+            : `Your agent needed permission for ${count} action${plural}`}
       </p>
 
       <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">
-        {blocked ? (
+        {reason === "permission" ? (
           <>
             Nothing was changed in your accounts. This agent has not been
             allowed to do this
@@ -166,8 +202,16 @@ export function ApprovalNotice({
             ) : null}
             .
           </>
+        ) : reason === "denied" ? (
+          // No "fix this" link. Nothing is broken - the user was asked,
+          // read the arguments and said no, which is the feature.
+          "Nothing was changed in your accounts."
+        ) : reason === "expired" ? (
+          "Nothing was changed in your accounts. The confirmation was "
+          + "not answered in time - ask again and it will wait for you."
         ) : (
-          "Nothing was changed in your accounts. These tools always ask first."
+          "Nothing was changed in your accounts. These tools always ask "
+          + "first, and there was nobody to ask."
         )}
       </p>
 
@@ -216,7 +260,11 @@ export function ApprovalNotice({
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <span aria-hidden>⚠</span>
-              Permission needed
+              {detail?.reason === "denied"
+                ? "You declined this"
+                : detail?.reason === "expired"
+                  ? "This request timed out"
+                  : "Permission needed"}
             </DialogTitle>
 
             <DialogDescription>
@@ -261,11 +309,7 @@ export function ApprovalNotice({
               </dl>
 
               <p className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-                Nothing in your account was changed. This was asked
-                outside a live chat - from the API, a script, or a
-                scheduled run - where there was nobody to answer. Ask
-                the agent again in the chat and it will stop and wait
-                for you.
+                {DETAIL_ADVICE[detail.reason ?? "unavailable"]}
               </p>
             </div>
           )}
@@ -280,3 +324,55 @@ export function ApprovalNotice({
     </div>
   );
 }
+
+/**
+ * Which refusal in a mixed list decides the headline.
+ *
+ * Ordered by how much the user has to DO about it:
+ *
+ *   permission   go to another screen and grant something
+ *   unavailable  ask again somewhere a prompt can appear
+ *   expired      ask again, and answer this time
+ *   denied       nothing; this is the system working
+ *
+ * A list holding both a scope refusal and a denial is reported as the
+ * scope refusal, because that is the one still blocking them.
+ */
+const REASON_RANK: RefusalReason[] = [
+  "permission",
+  "unavailable",
+  "expired",
+  "denied",
+];
+
+function mostActionable(approvals: RefusedCall[]): RefusalReason {
+  for (const reason of REASON_RANK) {
+    if (approvals.some((approval) => approval.reason === reason)) {
+      return reason;
+    }
+  }
+
+  return "unavailable";
+}
+
+const DETAIL_ADVICE: Record<RefusalReason, string> = {
+  permission:
+    "Nothing in your account was changed. This agent has not been "
+    + "allowed to do this kind of action. Grant the matching permission "
+    + "on its permissions screen, then ask again.",
+
+  denied:
+    "Nothing in your account was changed. You were shown this and "
+    + "declined it. Ask the agent again if you have changed your mind.",
+
+  expired:
+    "Nothing in your account was changed. You were asked to confirm "
+    + "this and the request timed out before it was answered. Ask again "
+    + "and the agent will wait for you.",
+
+  unavailable:
+    "Nothing in your account was changed. This was asked outside a "
+    + "live chat - from the API, a script, or a scheduled run - where "
+    + "there was nobody to answer. Ask the agent again in the chat and "
+    + "it will stop and wait for you.",
+};

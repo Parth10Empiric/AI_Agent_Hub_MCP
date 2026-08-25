@@ -18,7 +18,7 @@ from tests.tool_fixtures import build_registry  # noqa: E402
 """
 Tests for the Phase 5.1 scope vocabulary.
 
-Everything here runs against the REAL 61 tools, parsed out of
+Everything here runs against the REAL tool set, parsed out of
 services/*/tools.py by tool_fixtures - no database, no MCP server, no
 network. That is the point of keeping api/scopes.py pure: the rules
 that decide what an agent may do are testable in milliseconds, so there

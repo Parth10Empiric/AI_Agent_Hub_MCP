@@ -98,6 +98,30 @@ class ConnectRequest(BaseModel):
     scopes: list[str] = Field(default_factory=list)
 
 
+class ConnectionCheck(BaseModel):
+    """
+    The result of re-testing a stored credential.
+
+    A RESULT, not an error. "The check ran and the service said no" is
+    a successful request whose answer happens to be negative - and it
+    has to be, because recording that answer WRITES (status becomes
+    "revoked") and an endpoint that raises gets its transaction rolled
+    back by api/db/session.get_db. Raising would report the bad token
+    and then forget it.
+    """
+
+    # Did the service accept the credential?
+    valid: bool
+
+    # A sentence for the user: which service said what, and what to do.
+    # Never contains the credential.
+    detail: str
+
+    # The connection as it stands AFTER the check, so the client can
+    # render the new status without a second request.
+    connection: "ConnectionRead"
+
+
 class ConnectionRead(BaseModel):
     """
     A user's connection to one service.

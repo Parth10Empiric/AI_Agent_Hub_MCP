@@ -32,12 +32,26 @@ class RoutingSummary(BaseModel):
 
 
 class ApprovalRequired(BaseModel):
-    """A call that was refused because nobody could confirm it."""
+    """
+    A call that needed a human and did not get a yes.
+
+    `status` says which of the three refusals this was, because the UI
+    has to word them differently and a single "needed permission"
+    message is wrong for two of the three:
+
+        denied       a person read it and said no
+        expired      they were asked and never answered
+        unavailable  there was nobody to ask
+
+    Defaults to "unavailable" so an older client, or a handler that
+    does not report a status, keeps the behaviour this field replaced.
+    """
 
     tool_name: str
     operation: str
     risk_level: str
     argument_keys: list[str] = Field(default_factory=list)
+    status: str = "unavailable"
 
 
 class ChatResponse(BaseModel):

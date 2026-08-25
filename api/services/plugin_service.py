@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,9 +16,15 @@ from api.db.models import PluginConnection
 from api.audit import AuditAction, ResourceType
 from api.oauth import build_provider, supports_oauth
 from api.settings import APISettings
+from api.verification import (
+    CredentialRejected,
+    VerifiedCredential,
+    verify_credential,
+)
 from api.plugin_meta import presentation_for
 from api.services import audit_service
 from api.schemas.plugin import (
+    ConnectionCheck,
     ConnectionRead,
     PluginDetail,
     PluginSummary,
@@ -218,18 +225,53 @@ async def connect(
     credential: str,
     account_label: str | None = None,
     scopes: list[str] | None = None,
+    verifier: Callable[..., Awaitable[VerifiedCredential]] | None = None,
 ) -> ConnectionRead:
     """
-    Store an encrypted credential for one service.
+    Prove a credential works, then store it encrypted.
 
     Connecting an already-connected service REPLACES the credential
     rather than failing. That is what a user means by "reconnect", and
     the unique constraint on (user_id, plugin_key) means there is only
     ever one row to update.
+
+    VERIFICATION COMES FIRST, AND NOTHING IS WRITTEN WITHOUT IT
+
+    This function used to encrypt whatever string arrived, set status
+    "connected" and return 201. Paste "hello-world-1234" and the UI
+    showed a green badge; the failure surfaced later, inside an agent
+    turn, as an error nobody could trace back to the box they typed in.
+
+    "Connected" has to mean a connection was made. The only thing that
+    can establish that is the service itself, so we ask it - see
+    api/verification.py - and a rejected credential never reaches the
+    database at all. There is no half state to clean up, no row to
+    explain, and the error appears in the dialog where the mistake was
+    made.
+
+    THE LABEL AND SCOPES NOW COME FROM THE SERVICE
+
+    They used to be taken from the request body, so both were claims by
+    whoever pasted the token rather than facts about the account it
+    opens - and a connection could sit in the list labelled
+    "finance@company.com" while holding a personal token. The client's
+    label survives only as a fallback for services that report none.
+
+    `verifier` is injectable so tests do not need the network. The
+    default is the real one; a caller that passes None gets checked for
+    real, which is the safe direction for a parameter to default in.
     """
 
     if not engine.registry.by_namespace(key):
         raise UnknownPlugin(key)
+
+    check = verifier or verify_credential
+
+    # BEFORE the encrypt, before the row, before the audit line.
+    # Raises CredentialRejected or VerificationUnavailable, both of
+    # which the router turns into a specific HTTP status - see
+    # api/routers/plugins.py.
+    verified = await check(key, credential)
 
     # The plaintext credential exists only in this local variable and
     # is never assigned to the model. What reaches the database is
@@ -255,8 +297,10 @@ async def connect(
     # whole mechanism.
     connection.key_version = store.version
 
-    connection.account_label = account_label
-    connection.scopes = list(scopes or [])
+    # What the SERVICE said this credential is, with the client's
+    # label kept only as a fallback for a service that reports none.
+    connection.account_label = verified.account_label or account_label
+    connection.scopes = list(verified.scopes) or list(scopes or [])
     connection.status = "connected"
     connection.connected_at = now
     connection.expires_at = None
@@ -275,7 +319,10 @@ async def connect(
         resource_type=ResourceType.PLUGIN,
         plugin=key,
         method="token",
-        account=account_label,
+        # The VERIFIED account, so the audit trail records whose
+        # credential this actually is rather than what the person
+        # connecting chose to call it.
+        account=connection.account_label,
     )
 
     await session.flush()
@@ -316,6 +363,118 @@ async def disconnect(
     )
 
     return True
+
+
+async def verify_connection(
+    session: AsyncSession,
+    store: CredentialStore,
+    user_id: uuid.UUID,
+    key: str,
+    *,
+    verifier: Callable[..., Awaitable[VerifiedCredential]] | None = None,
+) -> ConnectionCheck | None:
+    """
+    Re-check a stored credential against the service. None if not connected.
+
+    WHY THIS EXISTS SEPARATELY FROM `connect`
+
+    Verifying at connect time proves a credential worked ONCE. Tokens
+    are then revoked on the provider's website, expire, get rotated by
+    a security policy, or belong to an account that loses access to a
+    repository - and none of that sends us a notification. A
+    connection is a claim with a shelf life, and the only way to know
+    it still holds is to ask again.
+
+    It also settles the connections that were stored BEFORE any of this
+    existed, which were never checked at all.
+
+    WHY IT RETURNS A RESULT INSTEAD OF RAISING ON A BAD TOKEN
+
+    Because it writes. A rejected check sets `status = "revoked"`, and
+    api/db/session.get_db rolls the transaction back whenever an
+    endpoint raises - so raising would report the bad token correctly
+    and then discard the very row that recorded it. The user would see
+    the warning and the database would forget it.
+
+    "The check ran and the answer was no" is a successful request with
+    a negative result, not a failed request. Only the third outcome -
+    we could not reach the service - raises, because then nothing was
+    learned and nothing should change.
+    """
+
+    connection = await _connection(session, user_id, key)
+
+    if connection is None:
+        return None
+
+    payload = store.decrypt(connection.credentials_enc)
+
+    # Both shapes. A pasted token is stored under "credential"; an
+    # OAuth token set under "access_token" - and TokenSet.to_payload
+    # writes both, so this order is belt and braces rather than a
+    # branch that can go stale.
+    credential = payload.get("credential") or payload.get("access_token")
+
+    if not credential:
+        connection.status = "revoked"
+        await session.flush()
+
+        return ConnectionCheck(
+            valid=False,
+            detail=(
+                "The stored credential could not be read. Reconnect "
+                "this service."
+            ),
+            connection=ConnectionRead.model_validate(connection),
+        )
+
+    check = verifier or verify_credential
+
+    try:
+        verified = await check(key, credential)
+
+    except CredentialRejected as exc:
+
+        connection.status = "revoked"
+
+        audit_service.record(
+            session,
+            AuditAction.PLUGIN_CHECK_FAILED,
+            user_id=user_id,
+            actor_user_id=user_id,
+            resource_type=ResourceType.PLUGIN,
+            plugin=key,
+            account=connection.account_label,
+            reason=str(exc),
+        )
+
+        await session.flush()
+
+        return ConnectionCheck(
+            valid=False,
+            detail=str(exc),
+            connection=ConnectionRead.model_validate(connection),
+        )
+
+    # Still good - and possibly better than we knew. A connection that
+    # was marked revoked by an earlier check recovers here without the
+    # user having to reconnect, which is what happens when a service
+    # was simply having a bad day.
+    connection.status = "connected"
+
+    if verified.account_label:
+        connection.account_label = verified.account_label
+
+    if verified.scopes:
+        connection.scopes = list(verified.scopes)
+
+    await session.flush()
+
+    return ConnectionCheck(
+        valid=True,
+        detail=f"{key} accepted this credential.",
+        connection=ConnectionRead.model_validate(connection),
+    )
 
 
 async def get_credential(

@@ -224,6 +224,174 @@ def test_write_requests_still_receive_read_tools():
     ), "a write request must still expose lookup tools"
 
 
+def test_a_read_shaped_question_about_writes_still_surfaces_them():
+    """
+    The bug that made the agent lie about what it could do.
+
+    "List all GitHub tools available to you for write or update
+    operations" leads with "list", so intent detection called it a
+    READ - and operation_alignment scored every write tool at a hard
+    0.0. All eight slots filled with `list_*` and `search_*` reads,
+    the model was handed no write tool at all, and answered - honestly,
+    from what it could see - that it had none. The user had four.
+
+    The first verb is still the intent. What changed is that a kind of
+    action the user NAMED is no longer erased by it.
+    """
+
+    decision = route(
+        "List all GitHub tools available to you for write or "
+        "update operations"
+    )
+
+    # The intent is unchanged - this really is a read-shaped sentence.
+    assert decision.intent is Operation.READ
+
+    writes = [
+        candidate.tool_name
+        for candidate in decision.candidates
+        if candidate.tool.operation is Operation.WRITE
+    ]
+
+    assert writes, (
+        "a question that says 'write' must surface write tools; "
+        f"got {decision.tool_names}"
+    )
+
+
+def test_naming_two_kinds_of_action_surfaces_both():
+    # "access" is an ADMIN verb and comes first, so it won the intent.
+    # Both of the things the user actually asked about have to appear
+    # regardless of which verb happened to lead the sentence.
+    decision = route("do you have access to create or read issues")
+
+    operations = {
+        candidate.tool.operation
+        for candidate in decision.candidates
+    }
+
+    assert Operation.WRITE in operations
+    assert Operation.READ in operations
+
+
+def test_an_unnamed_action_is_still_kept_out_of_read_requests():
+    # The other half of the rule, and the one that matters for safety.
+    # "show me my drive files" names only reads, so the exception never
+    # fires and delete stays hidden - exactly as before.
+    decision = route("show me my drive files")
+
+    assert decision.intent is Operation.READ
+
+    for candidate in decision.candidates:
+        assert candidate.tool.operation is not Operation.DELETE, (
+            candidate.tool_name
+        )
+
+
+# ---------------------------------------------------------------------
+# Multi-service, multi-step requests
+# ---------------------------------------------------------------------
+#
+# The hardest thing a router is asked to do, and the shape of every
+# useful agent task: read something here, write something there, then
+# report it somewhere else.
+#
+# The query is a real one, verbatim, from the session that exposed all
+# three bugs below.
+
+
+MULTI_STEP = (
+    "Inspect the **Empira_HR** repo and find exactly **3 real, verifiable "
+    "issues**. Create each issue in the repo with a short title, problem, "
+    "file/location, impact, and brief fix suggestion. Do not modify code or "
+    "invent issues. After creating all 3, send a short summary with the issue "
+    "titles and links to **#mcp_test** on Slack. Use minimum tokens and avoid "
+    "unnecessary exploration."
+)
+
+
+def github_and_slack(tool) -> bool:
+    """
+    An agent permitted on GitHub and Slack, and nothing else.
+
+    The production path always passes a predicate like this - it is the
+    agent's own permission policy - so routing is tested the way it is
+    actually called. See chat_service.send_message.
+    """
+
+    return tool.namespace in {"github", "slack"}
+
+
+def test_each_service_gets_a_way_to_do_what_was_asked():
+    """
+    A write quota shared BETWEEN services is won by one of them.
+
+    GitHub scores higher than Slack on this query, so it took every
+    reserved write slot. Slack was left with its three best-scoring
+    reads - list_users, get_user, auth_info - and the agent reported,
+    correctly, that it had no way to post anything. The second half of
+    the task was impossible before the model saw a single token.
+    """
+
+    names = route(MULTI_STEP, allow=github_and_slack).tool_names
+
+    assert "github_create_issue" in names, names
+    assert "slack_send_message" in names, names
+
+
+def test_a_write_tool_comes_with_the_lookup_that_addresses_it():
+    """
+    slack_send_message takes a channel_id, and nobody types one.
+
+    Offering the write without a way to turn "#mcp_test" into an id is
+    offering a tool the model cannot call - it either invents an id or
+    gives up, and both look like the agent being broken.
+    """
+
+    names = route(MULTI_STEP, allow=github_and_slack).tool_names
+
+    assert "slack_send_message" in names, names
+    assert "slack_list_channels" in names, names
+
+
+def test_a_caller_predicate_keeps_the_budget_on_usable_tools():
+    """
+    The budget must not be spent on tools that will be thrown away.
+
+    This query pools Google Drive on the word "file". An agent with no
+    Drive permission had six of its sixteen slots filled with Drive
+    tools, all of which the scope gate then discarded - so the model
+    received ten tools where the budget allowed sixteen, and the ones
+    it lost were ones it needed.
+    """
+
+    unfiltered = route(MULTI_STEP).tool_names
+
+    assert any(n.startswith("google_drive_") for n in unfiltered), (
+        "this query is only interesting because it pools Drive"
+    )
+
+    filtered = route(MULTI_STEP, allow=github_and_slack).tool_names
+
+    assert not any(n.startswith("google_drive_") for n in filtered)
+
+    # The freed slots went somewhere useful rather than being lost.
+    assert len(filtered) >= len(unfiltered)
+
+
+def test_a_reserved_tool_is_never_trimmed_away_again():
+    # The reserve passes used to overfill and then cut the result back
+    # by score, which always discarded the lowest-scoring picks - the
+    # exact tools the reservations existed to protect.
+    decision = route(MULTI_STEP, allow=github_and_slack)
+
+    assert len(decision.candidates) <= 24
+
+    scores = [c.score for c in decision.candidates]
+
+    assert scores == sorted(scores, reverse=True)
+
+
 def test_delete_requests_do_surface_delete_tools():
     decision = route("delete the meeting tomorrow")
 

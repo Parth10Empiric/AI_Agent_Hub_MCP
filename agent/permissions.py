@@ -184,6 +184,80 @@ class ScopePolicy:
 # ---------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalOutcome:
+    """
+    The answer to "may we do this ONE call, now?" - and why.
+
+    WHY THIS IS NOT JUST A BOOL
+
+    A bool says the call did not run. It cannot say which of three
+    quite different things happened:
+
+        denied       a person read the arguments and said no
+        expired      they were asked and never answered
+        unavailable  there was nobody to ask at all
+
+    The UI has to tell those apart. Merged into one "refused", someone
+    who clicked Deny gets told "there was nobody to answer", which
+    reads as a bug in software that just did exactly what they asked.
+
+    WHY IT DEFINES __bool__
+
+    So it is a drop-in for the bool every existing handler returns.
+    `AutoApprove` still returns `True`, `DenyAll` still returns a bool,
+    and the executor's `if not approved:` keeps working unchanged
+    whichever it receives. Handlers that have something more to say
+    return one of these; handlers that do not, do not have to care.
+    """
+
+    approved: bool
+    status: str = "denied"
+
+    def __bool__(self) -> bool:
+        return self.approved
+
+    @classmethod
+    def approve(cls) -> ApprovalOutcome:
+        return cls(approved=True, status="approved")
+
+    @classmethod
+    def deny(cls) -> ApprovalOutcome:
+        """A human read this and said no."""
+
+        return cls(approved=False, status="denied")
+
+    @classmethod
+    def expired(cls) -> ApprovalOutcome:
+        """A human was asked and never answered."""
+
+        return cls(approved=False, status="expired")
+
+    @classmethod
+    def unavailable(cls) -> ApprovalOutcome:
+        """There was nobody to ask."""
+
+        return cls(approved=False, status="unavailable")
+
+
+def outcome_status(answer: object) -> str:
+    """
+    The status behind whatever a handler returned.
+
+    A plain `True`/`False` carries no reason, so it maps to the two
+    statuses that were the only possibilities before ApprovalOutcome
+    existed. That keeps every old handler - and every test that asserts
+    on one - behaving exactly as it did.
+    """
+
+    status = getattr(answer, "status", None)
+
+    if isinstance(status, str):
+        return status
+
+    return "approved" if answer else "denied"
+
+
 @runtime_checkable
 class ApprovalHandler(Protocol):
     """
@@ -383,6 +457,7 @@ def default_approval() -> ApprovalHandler:
 
 __all__ = [
     "ApprovalHandler",
+    "ApprovalOutcome",
     "BudgetDecision",
     "AutoApprove",
     "AllowAllPolicy",
@@ -396,6 +471,7 @@ __all__ = [
     "ScopePolicy",
     "ToolBudget",
     "default_approval",
+    "outcome_status",
     "default_budget",
     "default_policy",
 ]

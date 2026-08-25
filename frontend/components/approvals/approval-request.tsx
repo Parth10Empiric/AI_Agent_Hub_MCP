@@ -60,12 +60,34 @@ export interface PendingApprovalEvent {
 
 export function ApprovalRequest({
   approval,
+  resolvedStatus = null,
   onResolved,
 }: {
   approval: PendingApprovalEvent;
+
+  /**
+   * The answer, when it came from somewhere other than this card.
+   *
+   * A resolution can arrive three ways: this card's buttons, ANOTHER
+   * TAB answering the same question, or the server's timer expiring
+   * it. Only the first was ever visible here, because the outcome
+   * lived in local state.
+   *
+   * Passing it in means the card shows what happened however it
+   * happened - and, more importantly, means the parent no longer has
+   * to unmount the card to represent "resolved". Unmounting is what
+   * made Deny look like the prompt had simply vanished.
+   */
+  resolvedStatus?: ApprovalStatus | null;
+
   onResolved?: (status: ApprovalStatus) => void;
 }) {
-  const [settled, setSettled] = useState<ApprovalStatus | null>(null);
+  const [answered, setAnswered] = useState<ApprovalStatus | null>(null);
+
+  // Whichever arrived first. The local answer wins so the card reacts
+  // the instant a button is pressed, without waiting for the server
+  // round trip to come back through the event stream.
+  const settled = answered ?? resolvedStatus;
 
   const remaining = useCountdown(approval.expires_at, settled === null);
 
@@ -81,7 +103,7 @@ export function ApprovalRequest({
     onSuccess: (result) => {
       const status = result.status as ApprovalStatus;
 
-      setSettled(status);
+      setAnswered(status);
       onResolved?.(status);
     },
 
@@ -90,7 +112,7 @@ export function ApprovalRequest({
       // failure worth a red banner: the correct thing happened, this
       // tab was just not the one that did it.
       if (error instanceof ApiError && error.status === 409) {
-        setSettled("expired");
+        setAnswered("expired");
         onResolved?.("expired");
         toast.info("That request was already answered.");
         return;

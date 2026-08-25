@@ -142,11 +142,26 @@ def test_an_unknown_tool_is_denied():
     # A tool added to the MCP server after this agent was configured is
     # not something the user consented to. It must not become available
     # on its own.
+    #
+    # The enabled set is ALL_NAMES minus this tool's own name, rather
+    # than minus a placeholder. The placeholder version of this test
+    # quietly stopped testing anything the day a real
+    # github_delete_repository tool shipped: the "unknown" name was in
+    # ALL_NAMES, so the enabled gate opened and the assertion failed on
+    # a policy that was working correctly. Subtracting the name under
+    # test cannot rot that way.
     class Unknown:
-        name = "github_delete_repository"
+        name = "github_delete_everything_everywhere"
         permissions = ("github:repository:admin", "github:*:admin")
 
-    policy = DatabaseScopePolicy({"github:*:admin"}, ALL_NAMES - {"x"})
+    policy = DatabaseScopePolicy(
+        {"github:*:admin"},
+        ALL_NAMES - {Unknown.name},
+    )
+
+    assert Unknown.name not in ALL_NAMES, (
+        "this test needs a name no real tool uses"
+    )
 
     assert not policy.check(Unknown()).allowed
 

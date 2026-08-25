@@ -17,7 +17,7 @@ from agent.schemas import ToolDefinition  # noqa: E402
 """
 Test fixtures built from the REAL MCP server source.
 
-Rather than hand-maintaining a copy of the 61 tools, this module parses
+Rather than hand-maintaining a copy of the 161 tools, this module parses
 `services/*/tools.py` with `ast` and extracts every tool's name and
 docstring exactly as the MCP server would expose them.
 
