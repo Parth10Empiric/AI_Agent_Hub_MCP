@@ -1,0 +1,124 @@
+# ---------------------------------------------------------
+# The Next.js frontend.
+#
+# Built with `context: ./frontend`, so every path below is relative to
+# that directory and frontend/.dockerignore is the exclusion list.
+# ---------------------------------------------------------
+
+# ---------- stage 1: dependencies ----------
+#
+# Kept separate from the build so that editing a component does not
+# reinstall 400 npm packages. package.json changes rarely; app/ changes
+# constantly.
+FROM node:20-alpine AS deps
+
+# Next's binaries are glibc-linked; Alpine ships musl. Without this
+# shim the build dies with "Error loading shared library ld-linux".
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+# `npm ci`, never `npm install`.
+#
+# ci installs EXACTLY the tree in package-lock.json and fails if the
+# lockfile disagrees with package.json. install is free to resolve a
+# newer minor version, which means the image you tested and the image
+# you deploy can contain different code with no commit between them.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+
+# ---------- stage 2: build ----------
+FROM node:20-alpine AS builder
+
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# WHERE THE API LIVES - AND WHY THIS IS A BUILD ARG, NOT AN ENV VAR.
+#
+# This one cost a debugging session, so it is written down.
+#
+# next.config.ts builds its rewrite destination from
+# process.env.API_PROXY_ORIGIN. With `output: "standalone"` that config
+# is EVALUATED DURING `npm run build` and the result is frozen into
+# .next/required-server-files.json. next.config.ts is not even copied
+# into the runtime image - `ls /app` shows only server.js, node_modules
+# and public.
+#
+# So setting API_PROXY_ORIGIN in docker-compose's `environment:` is too
+# late for the rewrite. The value baked in was the localhost default,
+# and every proxied call died with:
+#
+#     Failed to proxy http://127.0.0.1:8077/api/agents
+#     Error: connect ECONNREFUSED 127.0.0.1:8077
+#
+# The symptom was confusing because it was HALF broken: the SSE route
+# at app/api/conversations/[id]/messages/stream/route.ts reads the same
+# variable from module scope, and module scope in a Route Handler runs
+# at RUNTIME - so streaming worked while every plain JSON call 500'd.
+#
+# THE LIMITATION THIS LEAVES: the backend address is now baked into the
+# image, so the image is not portable to a topology where the API lives
+# somewhere else - you would rebuild rather than re-configure. That is
+# acceptable while compose owns the topology (`api` is a stable service
+# name in both the dev and prod compose files) and it is the thing to
+# fix first if this ever moves to a PaaS. The fix is a catch-all Route
+# Handler at app/api/[...path]/route.ts, which - like the SSE route
+# above - reads the variable per request and needs no rebuild.
+ARG API_PROXY_ORIGIN=http://api:8000
+ENV API_PROXY_ORIGIN=$API_PROXY_ORIGIN
+
+# Next inlines NEXT_PUBLIC_* variables into the browser bundle at BUILD
+# time too, for the same reason. This project has none today; the line
+# is here so the next person does not rediscover the rule the hard way.
+# ARG NEXT_PUBLIC_SOMETHING
+# ENV NEXT_PUBLIC_SOMETHING=$NEXT_PUBLIC_SOMETHING
+
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN npm run build
+
+
+# ---------- stage 3: runtime ----------
+FROM node:20-alpine AS runner
+
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    # Standalone's server.js binds to localhost by default, which
+    # inside a container means "reachable by nothing". Without this the
+    # container starts, logs "ready", and refuses every connection.
+    HOSTNAME=0.0.0.0
+
+# node:alpine already ships an unprivileged `node` user. Same reasoning
+# as the API image: the process should not be root.
+USER node
+
+# Three copies, because `output: "standalone"` splits the result:
+#   standalone/  server.js and the traced node_modules
+#   static/      hashed JS and CSS chunks - NOT included in standalone
+#   public/      images and fonts served as-is
+#
+# Miss the middle one and the app boots, renders HTML, and every asset
+# 404s - a blank white page with a healthy container behind it.
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+COPY --from=builder --chown=node:node /app/public ./public
+
+EXPOSE 3000
+
+# Any answer below 500 means the server is up. `/` redirects to the
+# login page for a signed-out visitor, so demanding a 200 here would
+# report a perfectly healthy frontend as dead.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD node -e "require('http').get({host:'127.0.0.1',port:3000,path:'/'},r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"
+
+CMD ["node", "server.js"]

@@ -1,0 +1,204 @@
+# ---------------------------------------------------------
+# Local development, and the Phase 6 milestone test:
+#
+#     git clone <repo> && cd personal-mcp-server
+#     cp .env.example .env        # fill in the secrets
+#     docker compose up --build
+#
+# A working app at http://localhost:3000, with no undocumented step.
+#
+# There is no `mcp` service. server.py is a stdio SUBPROCESS of the
+# API process (api/mcp/provider.py) - the transport is a pipe between
+# parent and child, which does not cross a container boundary. It ships
+# inside the api image. See docker/Dockerfile.api for the full note.
+# ---------------------------------------------------------
+
+services:
+
+  # -------------------------------------------------------
+  postgres:
+  # -------------------------------------------------------
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agenthub
+    volumes:
+      # A NAMED volume, not a bind mount. Without it the database lives
+      # in the container's writable layer and `docker compose down`
+      # deletes every user, agent and conversation.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # This is what `depends_on: condition: service_healthy` waits on.
+      # Plain `depends_on` only waits for the container to START, and
+      # Postgres accepts no connections for a second or two after that
+      # - long enough for the migration job to fail on a cold machine
+      # and pass on a warm one.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agenthub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      # Exposed so psql, Alembic and the test suite can reach it from
+      # the host. Remove this line in production: a database on a
+      # public port is scanned within minutes.
+      #
+      # OVERRIDABLE because a native PostgreSQL on the host already
+      # owns 5432 on most developer machines, and compose fails to
+      # start with "address already in use" rather than falling back.
+      # Set POSTGRES_HOST_PORT=5433 in .env to run both at once.
+      #
+      # This changes NOTHING inside the compose network - the API still
+      # connects to postgres:5432, because that is the container's own
+      # port and it is never remapped.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+
+  # -------------------------------------------------------
+  redis:
+  # -------------------------------------------------------
+    image: redis:7-alpine
+    # appendonly writes every change to disk, so a restart does not
+    # lose the rate-limit windows and pending approvals that Phase 6.4
+    # is about to put here.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      # Same story as Postgres: set REDIS_HOST_PORT=6380 if a native
+      # redis-server already holds 6379.
+      - "${REDIS_HOST_PORT:-6379}:6379"
+
+  # -------------------------------------------------------
+  migrate:
+  # -------------------------------------------------------
+    # ONE process runs the migrations, ONCE, BEFORE the API starts.
+    #
+    # The alternative - calling `alembic upgrade head` from the app's
+    # lifespan handler - looks tidier and is a corruption incident
+    # waiting to happen: scale to four API containers and all four
+    # race to ALTER the same tables at the same moment.
+    #
+    # This is a one-shot job. It runs to completion and exits 0, and
+    # `service_completed_successfully` below is what makes the API wait
+    # for it. If a migration fails, the API never starts - which is
+    # correct. An API running against a half-migrated schema is worse
+    # than an API that is down, because it corrupts data while looking
+    # healthy.
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      # Overrides whatever .env says. Inside the compose network the
+      # database is reachable as `postgres` (the service name), never
+      # as localhost - localhost in a container is the container.
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/agenthub
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # -------------------------------------------------------
+  api:
+  # -------------------------------------------------------
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/agenthub
+      REDIS_URL: redis://redis:6379/0
+
+      # OLLAMA RUNS ON YOUR HOST, NOT IN COMPOSE.
+      #
+      # The ollama Python client defaults to 127.0.0.1:11434, which
+      # inside a container is the container's own loopback - nothing is
+      # listening there. Both agent/loop.py and agent/embeddings.py
+      # construct their client with no host argument, and the library
+      # reads OLLAMA_HOST from the environment, so setting it here is
+      # enough. No code change.
+      #
+      # host.docker.internal is provided by the extra_hosts entry
+      # below. On Docker Desktop it exists already; on Linux it does
+      # not, which is why the mapping is declared explicitly.
+      OLLAMA_HOST: http://host.docker.internal:11434
+
+      MCP_ENVIRONMENT: development
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    ports:
+      # 8077 on the host to match the port the frontend proxy and the
+      # `npm run gen:api` script already assume.
+      - "${API_HOST_PORT:-8077}:8000"
+
+    # The MCP server's LEGACY single-tenant credentials.
+    #
+    # .dockerignore deliberately keeps credentials.json and token.json
+    # OUT of the image - baking live OAuth tokens into a layer is how
+    # they end up in a registry. Phase 5 moved them into the
+    # per-user plugin_connections table, so most setups need nothing
+    # here.
+    #
+    # Uncomment ONLY if you still rely on the .env fallback, and only
+    # after the files exist - Docker silently creates a DIRECTORY where
+    # a bind-mounted file is missing, and the error you then get says
+    # "Is a directory" from somewhere unrelated.
+    # volumes:
+    #   - ./credentials.json:/app/credentials.json:ro
+    #   - ./token.json:/app/token.json:ro
+
+  # -------------------------------------------------------
+  frontend:
+  # -------------------------------------------------------
+    build:
+      context: ./frontend
+      dockerfile: ../docker/Dockerfile.frontend
+      args:
+        # Needed at BUILD time by next.config.ts's rewrite, which
+        # `output: "standalone"` freezes into the bundle. See the long
+        # note in docker/Dockerfile.frontend - passing this only in
+        # `environment:` below leaves every proxied JSON call 500ing
+        # while SSE mysteriously keeps working.
+        API_PROXY_ORIGIN: http://api:8000
+    environment:
+      # The SAME value again, and not a redundant one: the streaming
+      # route handler at app/api/conversations/[id]/messages/stream
+      # reads it at RUNTIME. Build arg covers the rewrite, environment
+      # covers the route handler. Both are required.
+      #
+      # It is not NEXT_PUBLIC_*, so the browser never learns this
+      # address - which is the point: in production the API can sit on
+      # a private network the browser cannot reach at all.
+      API_PROXY_ORIGIN: http://api:8000
+    depends_on:
+      # Deliberately NOT service_healthy. The frontend renders its own
+      # pages fine while the API is starting; making it wait would turn
+      # a slow API boot into "the whole site is down".
+      - api
+    ports:
+      # 3000 is effectively FIXED, unlike the ports above.
+      #
+      # OAUTH_REDIRECT_BASE is registered with GitHub, Google and Slack
+      # character for character, and every one of those callback URLs
+      # says localhost:3000. Publish the frontend anywhere else and
+      # every OAuth connection fails with redirect_uri_mismatch.
+      #
+      # Which also means: stop your local `npm run dev` before
+      # `docker compose up`. They cannot share the port, and only one
+      # of them can own the OAuth callback.
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
+
+volumes:
+  pgdata:
+  redisdata:

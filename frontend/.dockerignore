@@ -1,0 +1,21 @@
+# The frontend image builds with `context: ./frontend`, so THIS file
+# is the one Docker reads - the repository-root .dockerignore is not
+# consulted for that build.
+
+# Host-built, and full of platform-specific binaries (esbuild, swc,
+# sharp) that segfault inside the container. npm ci rebuilds them.
+node_modules
+
+# Stale build output. The image builds its own.
+.next
+.next-e2e
+tsconfig.tsbuildinfo
+
+# Test artefacts
+test-results
+playwright-report
+tests
+
+.env
+.env.*
+!.env.example

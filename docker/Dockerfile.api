@@ -1,0 +1,112 @@
+# ---------------------------------------------------------
+# The FastAPI backend - and the MCP server with it.
+#
+# WHY THERE IS NO SEPARATE Dockerfile.mcp
+#
+# phases_doc/Phase6.md sketches an `mcp` container beside the API.
+# That does not match the code. api/mcp/provider.py launches
+# server.py as a STDIO SUBPROCESS of the API process:
+#
+#     stdio_client(StdioServerParameters(command=sys.executable, ...))
+#
+# The transport is a pair of pipes between parent and child. Pipes do
+# not cross a container boundary, so an `mcp` service in compose would
+# start a second, idle MCP server while the API silently spawned its
+# own anyway.
+#
+# So server.py and its service packages ship INSIDE this image, and
+# the API image needs a Python interpreter on PATH for sys.executable
+# to point at. When the provider grows an HTTP transport (the Protocol
+# in api/mcp/provider.py already anticipates it) this splits into two
+# images. Not before.
+# ---------------------------------------------------------
+
+# ---------- stage 1: build ----------
+#
+# 3.10, NOT the 3.14 in the phase document. requirements.txt is pinned
+# with environment markers written for this interpreter - notably
+#   rpds-py==0.30.0; python_version < "3.11"
+# A newer base silently resolves the other side of that marker and
+# installs a different dependency tree than the one that is tested.
+FROM python:3.10-slim AS builder
+
+# Compilers for any dependency without a manylinux wheel. They live
+# ONLY in this stage: the final image never gets a toolchain, which is
+# both smaller and one less thing for an attacker who gets a shell.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        gcc \
+        python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# requirements.txt is copied ALONE, before the source.
+#
+# Docker caches each layer and invalidates everything after the first
+# change. Copy the source first and every edit to a Python file
+# reinstalls 90 packages. This way the install layer is reused until
+# the dependencies themselves change.
+COPY requirements.txt .
+
+# --user installs into /root/.local, which is one self-contained
+# directory the next stage can copy wholesale.
+RUN pip install --user --no-cache-dir --no-warn-script-location \
+    -r requirements.txt
+
+
+# ---------- stage 2: runtime ----------
+FROM python:3.10-slim
+
+# NEVER run as root.
+#
+# A container is not a security boundary on its own. Whatever the
+# process can do, an attacker who achieves execution can do - and a
+# root process is one kernel bug away from the host. --shell /bin/false
+# means the account cannot be logged into even if a password is set.
+RUN useradd --create-home --shell /bin/false appuser
+
+WORKDIR /app
+
+# Only the installed packages cross over - no compilers, no pip cache,
+# no build directory.
+COPY --from=builder /root/.local /home/appuser/.local
+
+# --chown at COPY time rather than a later `chown -R`, which would
+# duplicate every file into a second layer and double the image size.
+COPY --chown=appuser:appuser . .
+
+USER appuser
+
+ENV PATH=/home/appuser/.local/bin:$PATH \
+    # .pyc files written at runtime are noise in a container that is
+    # thrown away, and they land in a directory the user may not own.
+    PYTHONDONTWRITEBYTECODE=1 \
+    # Unbuffered, or logs sit in a pipe buffer and appear minutes late
+    # in `docker logs` - exactly when you need them soonest.
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# LIVENESS ONLY. /health deliberately touches no dependency
+# (api/routers/health.py). If this checked the database, a two-second
+# Postgres blip would make Docker restart every API container at once
+# and turn a blip into an outage. Readiness is the load balancer's
+# question, and it asks /ready.
+#
+# --start-period covers a slow first boot: the lifespan handler spawns
+# the MCP subprocess and classifies 161 tools before serving anything.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+
+# ONE WORKER, deliberately.
+#
+# api/notifier.py keeps approval wakeup events in process memory and
+# api/ratelimit.py keeps its sliding windows there too. With N workers
+# an approval resolved on worker 3 never reaches the turn parked on
+# worker 1 - it just times out, with nothing in the logs to say why -
+# and every rate limit becomes N times looser than configured.
+#
+# This line becomes `--workers 4` in the same commit that moves both
+# onto Redis, and not one commit earlier.
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

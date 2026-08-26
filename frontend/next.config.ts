@@ -12,6 +12,23 @@ const API_ORIGIN =
 
 const nextConfig: NextConfig = {
   /**
+   * Ship a self-contained server instead of the whole project.
+   *
+   * A normal `next build` still needs node_modules to run - roughly
+   * 500 MB of it, most of which is build tooling that will never be
+   * called again. `standalone` traces which files the server actually
+   * imports and writes them, plus a server.js, into
+   * `${distDir}/standalone`. The Docker image copies that and nothing
+   * else, which takes it from ~1.2 GB to ~200 MB.
+   *
+   * It is set here rather than only in the Dockerfile so that a local
+   * `npm run build` produces the same artefact CI and production run.
+   * A build flag that exists only in the deployment pipeline is a
+   * difference you find out about during a deployment.
+   */
+  output: "standalone",
+
+  /**
    * Where the build output goes.
    *
    * `next dev` and `next build` BOTH write here, and they write

@@ -1,0 +1,60 @@
+# ---------------------------------------------------------
+# .dockerignore is a SECURITY CONTROL, not an optimisation.
+#
+# Everything not excluded here is sent to the Docker daemon and
+# baked into an image layer by `COPY . .`. Image layers are
+# PERMANENT: deleting a file in a later layer does not remove it
+# from the earlier one, and anyone who can pull the image can read
+# it back out.
+#
+# This repository's root currently holds .env, credentials.json,
+# token.json and google_calendar_token.json - a complete set of live
+# OAuth credentials. Without the block below, `docker push` publishes
+# them.
+# ---------------------------------------------------------
+
+# --- secrets: the reason this file exists ---
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+*token*.json
+*_token.json
+google_calendar_token.json
+
+# --- history: .git carries every secret ever committed, even ones
+#     since deleted from the working tree ---
+.git
+.gitignore
+.github
+
+# --- host-built virtualenv: Linux-incompatible binaries, and huge ---
+.venv
+venv
+
+# --- build noise ---
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+
+# --- the frontend builds in its own image; node_modules from the host
+#     contains platform-specific binaries that break in the container ---
+frontend/node_modules
+frontend/.next
+frontend/.next-e2e
+frontend/test-results
+frontend/playwright-report
+
+# --- not needed at runtime ---
+tests
+phases_doc
+devloper_docs
+*.md
+!README.md
+scripts/check_secrets.py
+jj.txt
