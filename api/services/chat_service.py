@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sqlalchemy import func, select
@@ -215,6 +215,201 @@ async def _load_turn_context(
     )
 
 
+TURN_FAILED_NOTE = """\
+This turn stopped before it finished, so I could not write a reply. \
+Anything above that already ran has been kept in the timeline. Check \
+the affected service before retrying - work that was already done \
+cannot be undone by the failure.\
+"""
+
+# The same event, when NOTHING ran.
+#
+# Two notes rather than one, because the difference is the only thing
+# the reader needs. "Check the affected service" is essential advice
+# after sixteen issues were created and unrecorded, and it is alarming
+# nonsense after a request that never left the building.
+TURN_STOPPED_NOTE = """\
+This turn stopped before it started, so nothing was changed in any of \
+your accounts.\
+"""
+
+
+async def record_failed_turn(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    executions: list[dict],
+    *,
+    reason: str = "",
+    detail: str | None = None,
+    question: str | None = None,
+) -> None:
+    """
+    Persist what a turn DID, after the turn itself died.
+
+    THE SESSION THIS COMES FROM
+
+        05:53:31  user: "Yes, create the issues"
+        05:53:31  approval requested   github_create_issue
+        ...       22 approvals granted, one at a time
+        05:56:52  approval granted     github_create_issue
+                  - and then nothing, ever
+
+    Sixteen issues existed on GitHub. The database had no assistant
+    message, no tool_executions rows, and a user message with nothing
+    after it. The chat showed a question the agent appeared to ignore.
+
+    WHY THE RECORD VANISHED AND THE WORK DID NOT
+
+    Everything a turn does is spread across three places that fail
+    differently:
+
+        GitHub          not transactional at all. An issue created is
+                        created.
+        audit_log       committed as it goes, because an approval has
+                        to be visible to the request that answers it.
+                        This is why 22 approvals survived.
+        the turn        one transaction, committed at the very end -
+                        the user message, every execution, the answer.
+
+    So a failure anywhere before that final commit discards precisely
+    the record of the work that actually happened, and keeps every
+    trace of having asked permission to do it. The database ends up
+    describing a turn that never ran, next to a GitHub repository that
+    disagrees.
+
+    This does not make the turn transactional - nothing can, once a
+    real issue exists. It makes the RECORD honest: a conversation is
+    never left with a dangling question, and the executions that ran
+    are still in the timeline.
+
+    Runs in its OWN session, opened after the turn's session has been
+    rolled back. It must not reuse a session whose transaction is
+    already dead - that is the failure it exists to survive.
+
+    `executions` are `tool_end` payloads (ExecutionRecord.to_dict), not
+    ExecutionRecord objects: by the time this runs the record objects
+    are gone with the turn, but the caller has been handed every one of
+    them as an event.
+
+    Best effort by definition. A caller must never fail twice.
+    """
+
+    # Nothing ran, and nothing to say about it. The caller has no
+    # detail to pass on, so a note here would be pure noise attached to
+    # a question that is about to disappear anyway.
+    if not executions and not detail and not question:
+        return
+
+    conversation = await session.scalar(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
+        )
+    )
+
+    if conversation is None:
+        return
+
+    # THE QUESTION, RE-CREATED IF THE TURN TOOK IT DOWN WITH IT.
+    #
+    # send_message adds the user's message first, "saved BEFORE
+    # anything can fail" - and that intent is defeated by the turn
+    # being ONE transaction: a failure anywhere rolls the question back
+    # with everything else. From the database, after the model provider
+    # started returning 429:
+    #
+    #     06:37:02  assistant  "This turn stopped before it..."
+    #     06:37:20  assistant  "This turn stopped before it..."
+    #     06:37:32  assistant  "This turn stopped before it..."
+    #
+    # Three notes and not one user message - the questions they answer
+    # had all been rolled back. Losing what someone typed is the one
+    # failure they will never forgive, and it is worse when the
+    # explanation survives without it.
+    #
+    # Only when it is actually missing: a turn that died AFTER an
+    # approval committed still has its question, and a second copy
+    # would be worse than none.
+    if question:
+
+        newest = await session.scalar(
+            select(Message)
+            .where(Message.conversation_id == conversation.id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(1)
+        )
+
+        already_there = (
+            newest is not None
+            and newest.role == "user"
+            and newest.content == question
+        )
+
+        if not already_there:
+            await conversation_service.add_message(
+                session,
+                conversation,
+                role="user",
+                content=question,
+            )
+
+    # WHICH NOTE, AND WHY IT MATTERS.
+    #
+    # `detail` is the failure in the words of whatever refused - "your
+    # model provider's usage limit has been reached", with the
+    # provider's own link. That is the sentence the reader can act on,
+    # so it wins over both of our generic ones.
+    content = detail or (
+        TURN_FAILED_NOTE if executions else TURN_STOPPED_NOTE
+    )
+
+    message = await conversation_service.add_message(
+        session,
+        conversation,
+        role="assistant",
+        content=content,
+        routing={
+            "turn_failed": True,
+            "reason": reason,
+            "executions_recovered": len(executions),
+        },
+    )
+
+    for data in executions:
+
+        started = data.get("started_at")
+
+        session.add(
+            ToolExecution(
+                id=data["execution_id"],
+                message_id=message.id,
+                conversation_id=conversation.id,
+                agent_id=conversation.agent_id,
+                user_id=user_id,
+                tool_name=data.get("tool"),
+                server=data.get("server") or "",
+                namespace=data.get("namespace"),
+                operation=data.get("operation") or "",
+                risk_level=data.get("risk_level") or "",
+                status=data.get("status") or "failed",
+                started_at=(
+                    datetime.fromisoformat(started)
+                    if isinstance(started, str)
+                    else datetime.now(timezone.utc)
+                ),
+                duration_ms=data.get("duration_ms") or 0,
+                attempts=data.get("attempts") or 1,
+                arguments=data.get("arguments") or {},
+                coercions=list(data.get("coercions") or ()),
+                approved_by_user=data.get("approved_by_user"),
+                error=data.get("error"),
+            )
+        )
+
+    await session.flush()
+
+
 async def _credentials_changed_at(
     session: AsyncSession,
     user_id: uuid.UUID,
@@ -255,9 +450,40 @@ BLOCKED_NOTICE = """\
 [runtime notice] These tools match this request but were withheld from \
 you: {blocked}. They EXIST on this server - you are simply not \
 permitted to use them right now. Do not tell the user the capability \
-does not exist or that no such tool exists. If you cannot answer \
-without them, say plainly which permission is missing and that they \
-can grant it in the agent's settings.\
+does not exist or that no such tool exists. You have NO DATA of the \
+kind these tools return: do not produce it from memory, from earlier in \
+this conversation, or from what the request implies it should look \
+like. Names, identifiers, counts, dates and lists invented to fill this \
+gap are indistinguishable from real ones to the user, and stating that \
+you called a tool you did not call is worse again. Answer with what is \
+missing and how to grant it, and nothing else.\
+"""
+
+"""
+WHY THIS NOTICE FORBIDS THE ANSWER AND NOT JUST THE EXCUSE.
+
+The first version constrained the WORDING of a refusal - do not say the
+capability does not exist - and left the model free to do something
+worse instead. From a real session, with every Google Drive tool
+blocked:
+
+    user   "so you just listout all folder name"
+    agent  five folder names, five Drive-shaped ids, creation and
+           modification dates, a total. All invented.
+    user   "you need to call tool, not guess"
+    agent  "Success! I called the actual Google Drive tool" - it had
+           called two Slack tools, and repeated the same fabrication.
+
+Nothing in the notice was disobeyed. It never said "do not make the
+data up", because that seemed too obvious to write down. It is not: a
+model with a direct request, no tool, and a user insisting has one
+completion available that satisfies everyone, and it is the false one.
+Refusing is the improbable continuation, so it has to be the instructed
+one.
+
+The prompt is the cheap half. The load-bearing half is that the tools
+are absent from `mcp_tools`, absent from `allowed_tools`, and refused
+by the executor if asked for anyway - see the call site.
 """
 
 
@@ -320,6 +546,16 @@ async def _blocked_capabilities(
 
     floor = min(candidate.score for candidate in decision.candidates)
 
+    # Which services this agent HAS, derived from the tools it has
+    # switched on rather than re-queried. A tool whose namespace is not
+    # in here has no agent_tools row at all, which is a different
+    # problem with a different fix from a revoked permission.
+    agent_services = {
+        definition.namespace or ""
+        for name in enabled
+        if (definition := engine.get_tool(name)) is not None
+    }
+
     blocked = await asyncio.to_thread(
         engine.route,
         content,
@@ -339,11 +575,24 @@ async def _blocked_capabilities(
         if candidate.tool is None or candidate.score < floor:
             continue
 
-        # WHICH gate refused it, because the two need different
-        # sentences from the user's point of view: one is a checkbox on
-        # this agent, the other is a permission grant.
+        # WHICH gate refused it, because all three need a different
+        # sentence from the user's point of view - and each names a
+        # different screen. Getting this wrong sent a user to a settings
+        # page to flip a switch that was not on it.
         if candidate.tool_name not in enabled:
-            reason = "switched off in this agent's tool settings"
+
+            if (candidate.tool.namespace or "") not in agent_services:
+                # The service was never added to this agent, so the
+                # tool has no row at all. No permission grant fixes
+                # this - the fix is one screen back.
+                reason = (
+                    "its service is not added to this agent - add it "
+                    "under Settings, Services"
+                )
+
+            else:
+                reason = "switched off for this agent"
+
         else:
             reason = (
                 "needs the permission "

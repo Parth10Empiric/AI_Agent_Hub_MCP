@@ -26,13 +26,16 @@ import type { ScopeOption } from "@/lib/types";
  *
  * THE TWO ARE DIFFERENT QUESTIONS, AND BOTH ARE CHECKED
  *
- *     Tools (settings)   which tools are switched on?  a preference
- *     Permissions (here) what class of action at all?  the envelope
+ *     Services (settings)  which services does it HAVE?   the surface
+ *     Permissions (here)   what may it DO with them?      the envelope
  *
- * The backend checks them independently before any tool runs, so
- * ticking a write tool in settings does NOT by itself let this agent
- * write. Two deliberate actions stand between "create agent" and "may
- * modify a client's repository", and this screen is the second one.
+ * The backend checks them independently before any tool runs, so a
+ * permission over a service this agent was never given does nothing at
+ * all - which is why this page now lists only the services the agent
+ * actually has. Granting "read Google Drive" to an agent with no Drive
+ * tools was a switch that reported success and changed nothing, and it
+ * was the whole of a real bug: the agent kept insisting Drive was
+ * switched off while this page showed the permission granted.
  *
  * WHY SCOPES AND NOT JUST MORE CHECKBOXES
  *
@@ -151,19 +154,45 @@ export default function AgentPermissionsPage({
         <h1 className="mt-2 text-2xl font-semibold">Permissions</h1>
 
         <p className="mt-2 text-sm text-muted-foreground">
-          What this agent is allowed to do, whatever it is asked. A tool
-          only runs if it is switched on in settings <em>and</em> covered
-          by a permission here.
+          What this agent is allowed to do, whatever it is asked. Only
+          the services this agent has are listed - add one under{" "}
+          <Link
+            href={`/agents/${id}/settings`}
+            className="underline underline-offset-2"
+          >
+            Settings
+          </Link>{" "}
+          to see its permissions here.
         </p>
       </div>
 
-      {grantedCount === 0 && (
-        <Alert>
+      {/* NO SERVICES IS A DIFFERENT PROBLEM FROM NO PERMISSIONS, AND
+          IT HAS A DIFFERENT FIX - one screen back, not on this page.
+          Showing "grant a permission below" with nothing below it is
+          how someone concludes the product is broken. */}
+      {groups.length === 0 ? (
+        <Alert data-testid="no-services">
           <AlertDescription>
-            This agent has no permissions and cannot do anything yet.
-            Grant at least one &ldquo;read&rdquo; permission below.
+            This agent has no services yet, so there is nothing to
+            permit. Add one under{" "}
+            <Link
+              href={`/agents/${id}/settings`}
+              className="font-medium underline underline-offset-2"
+            >
+              Settings → Services
+            </Link>
+            , then come back.
           </AlertDescription>
         </Alert>
+      ) : (
+        grantedCount === 0 && (
+          <Alert>
+            <AlertDescription>
+              This agent has no permissions and cannot do anything yet.
+              Grant at least one &ldquo;read&rdquo; permission below.
+            </AlertDescription>
+          </Alert>
+        )
       )}
 
       {/* SERVICES WITH NO ACCOUNT BEHIND THEM ARE NOT CHOICES.
@@ -188,6 +217,17 @@ export default function AgentPermissionsPage({
             {!group.connected && (
               <span className="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
                 not connected
+              </span>
+            )}
+
+            {/* The only reason a service the agent does NOT have
+                appears on this page: it still holds a grant over it.
+                That grant is live and must stay revocable, but it
+                covers no tools until the service is added back - so the
+                badge says which of the two fixes applies. */}
+            {!group.onAgent && (
+              <span className="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                not on this agent
               </span>
             )}
           </div>
@@ -356,6 +396,11 @@ function groupByService(options: ScopeOption[]): ScopeGroup[] {
       // same answer - but reading it off the group rather than off one
       // arbitrary member is what keeps this true if that ever changes.
       connected: items.every((option) => option.connected),
+
+      // False only for a grant the agent still holds over a service it
+      // no longer has. The server filters everything else out, so this
+      // group is a leftover to clean up, not a choice to offer.
+      onAgent: items.every((option) => option.on_agent),
     }));
 }
 
@@ -363,6 +408,7 @@ interface ScopeGroup {
   service: string;
   options: ScopeOption[];
   connected: boolean;
+  onAgent: boolean;
 }
 
 function byBreadthThenName(a: ScopeOption, b: ScopeOption): number {

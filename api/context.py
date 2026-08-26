@@ -221,7 +221,10 @@ They change between messages, because the user grants and revokes \
 permissions while you are talking. If anything earlier in this \
 conversation - including something you said yourself - claims you lack \
 a tool, treat it as out of date: read the tools you have been given \
-now before saying you cannot do something.\
+now before saying you cannot do something. The set also SHRINKS. A \
+tool result already in this conversation was really fetched: if the \
+tool that produced it is absent now, say it is unavailable for this \
+message - never that you imagined the tool or made the result up.\
 """
 
 """
@@ -250,6 +253,36 @@ retries, the more confident the refusal gets.
 One sentence in the system message is the whole fix, and it belongs
 here rather than in the user's own prompt: it is a fact about how the
 runtime works, not a preference they should have to know to write down.
+
+AND THE SAME AXIS IN REVERSE, WHICH IS WORSE.
+
+The rule above covers a toolset that GREW. It says nothing about one
+that shrank, and the router shrinks it every turn - it offers the tools
+that match the current message, so a change of subject silently removes
+the last subject's tools. Another session, from the database:
+
+    turn 1  "list out all github repo naem"
+            github_list_repositories called. Two repos returned.
+    turn 2  "delete test repo"          routed to github, asked to
+                                        confirm before deleting.
+    turn 3  "Yes, delete it"            routed to GOOGLE CALENDAR,
+                                        because "yes" fuzzy-matched
+                                        the alias "yesterday".
+
+With no GitHub tool in front of it and a transcript full of GitHub
+work, the model reconciled the two the only way that fit: "I don't
+actually have access to GitHub tools. Looking back at our
+conversation, I realize I made up those tools." It had not. It had
+listed the user's real repositories, from a real call, two messages
+earlier - and it then offered to walk them through deleting the repo
+by hand.
+
+The routing collision is fixed at source (see the affirmatives in
+lexicon.py STOPWORDS). This sentence is the backstop, because routing
+narrows the toolset on purpose and will do it again for honest
+reasons. "I cannot do that right now" is recoverable. "I lied to you
+earlier" is not - it teaches the user to distrust the results that
+were true.
 """
 
 

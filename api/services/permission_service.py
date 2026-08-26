@@ -8,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent.engine import AgentEngine
 
 from api.audit import AuditAction, ResourceType
-from api.db.models import Agent, AgentScope, AuditLog, PluginConnection
+from api.db.models import (
+    Agent,
+    AgentScope,
+    AgentTool,
+    AuditLog,
+    PluginConnection,
+)
 from api.pagination import Cursor, build_page
 from api.schemas.permission import (
     AgentScopes,
@@ -103,6 +109,7 @@ def _options(
     engine: AgentEngine,
     granted: set[str],
     connected: set[str] | None = None,
+    services: set[str] | None = None,
 ) -> list[ScopeOption]:
     """
     Every scope the live registry makes grantable, annotated.
@@ -127,6 +134,28 @@ def _options(
       Deciding what to hide is a presentation question, and the client
       has the context to answer it (this screen wants them tucked away;
       an audit view wants all of them).
+
+    `services` IS filtered, and it is a different axis entirely.
+
+    `connected` asks "does the USER have an account for this?" - a fact
+    about the user, true of every one of their agents at once.
+    `services` asks "does THIS AGENT draw tools from it?" - a fact about
+    one agent, and the answer is no by default.
+
+    An agent only ever sees tools from a namespace it holds rows for, so
+    a scope over a service it was never given is not a permission that
+    is merely inert - it is a permission over nothing at all. Offering
+    it produced the exact confusion this filter exists to end: the user
+    granted "google_drive:*:read", the page showed it granted, and the
+    agent still answered that Drive was switched off. The switch they
+    needed was "add Google Drive to this agent", one screen back.
+
+    THE ONE THING THIS MUST NOT DO is hide something granted. A scope an
+    agent already holds stays listed whatever else is true of it - that
+    is how it gets revoked, and it is the same rule `connected` follows
+    two paragraphs up. It also carries the legacy case: agents that were
+    granted Drive scopes before the Services screen existed still have
+    them, and they must be visible to be taken away.
     """
 
     counts: dict[str, int] = {}
@@ -148,6 +177,16 @@ def _options(
             # still unusable, which is the safe direction.
             continue
 
+        # Not on this agent, and not granted to it - so it is a choice
+        # that could not take effect. Granted always survives: see the
+        # docstring.
+        if (
+            services is not None
+            and service not in services
+            and scope not in granted
+        ):
+            continue
+
         options.append(
             ScopeOption(
                 scope=scope,
@@ -157,6 +196,14 @@ def _options(
                 tool_count=counts[scope],
                 granted=scope in granted,
                 connected=connected is None or service in connected,
+
+                # False marks the legacy/edge case the filter above
+                # lets through: a live grant over a service this agent
+                # no longer has. The UI needs to say WHY a switch is
+                # there but useless, and "this agent does not have
+                # Google Drive" is a different sentence from "you have
+                # not connected Google Drive".
+                on_agent=services is None or service in services,
             )
         )
 
@@ -194,9 +241,21 @@ async def list_scopes(
         )
     )
 
+    # Which services this AGENT draws tools from - the namespaces it
+    # holds agent_tools rows for. Distinct in SQL rather than a set over
+    # every row: an agent with 108 tools has four namespaces, and there
+    # is no reason to move the other 104 rows across the wire.
+    services = set(
+        await session.scalars(
+            select(AgentTool.namespace)
+            .where(AgentTool.agent_id == agent_id)
+            .distinct()
+        )
+    )
+
     return AgentScopes(
         granted=[ScopeRead.model_validate(row) for row in rows],
-        available=_options(engine, granted, connected),
+        available=_options(engine, granted, connected, services),
     )
 
 

@@ -203,8 +203,14 @@ class GoogleDriveService:
         self,
         query: str,
         page_size: int = 20,
-    ) -> list[dict[str, Any]]:
-        """Search files in Google Drive by name."""
+        page_token: str | None = None,
+    ) -> GoogleDriveSearchResult:
+        """
+        Search files in Google Drive by name.
+
+        Returns ONE PAGE. `page_token` continues a previous search - see
+        GoogleDriveSearchResult for why the page has to say so itself.
+        """
 
         try: 
             
@@ -222,7 +228,12 @@ class GoogleDriveService:
                 .list(
                     q=drive_query,
                     pageSize=page_size,
+                    pageToken=page_token,
+                    # nextPageToken IS a field, and asking for
+                    # `files(...)` alone silently drops it - which is
+                    # why this looked like an API with no pagination.
                     fields=(
+                        "nextPageToken,"
                         "files("
                         "id,"
                         "name,"
@@ -246,9 +257,14 @@ class GoogleDriveService:
                 for file in response.get("files", [])
             ]
 
+            next_page_token = response.get("nextPageToken")
+
             return GoogleDriveSearchResult(
                 files=files,
+                returned=len(files),
                 total=len(files),
+                next_page_token=next_page_token,
+                has_more=bool(next_page_token),
             )
             
         except HttpError as exc:
@@ -298,10 +314,20 @@ class GoogleDriveService:
 
     def list_folder(
         self,
-        folder_id: str,
+        folder_id: str = "root",
         page_size: int = 100,
+        page_token: str | None = None,
     ) -> GoogleDriveSearchResult:
-        """List files and folders inside a Google Drive folder."""
+        """
+        List files and folders inside a Google Drive folder.
+
+        `folder_id` defaults to "root" - Drive's own alias for My Drive.
+        It is a literal the API understands, not an id to be looked up
+        first, and leaving it required is what made the agent ask the
+        user for an id rather than just listing their Drive.
+
+        Returns ONE PAGE; `page_token` continues it.
+        """
 
         try:
             service = self._get_service()
@@ -316,8 +342,10 @@ class GoogleDriveService:
                 .list(
                     q=drive_query,
                     pageSize=page_size,
+                    pageToken=page_token,
                     orderBy="folder,name",
                     fields=(
+                        "nextPageToken,"
                         "files("
                         "id,"
                         "name,"
@@ -341,9 +369,14 @@ class GoogleDriveService:
                 for file in response.get("files", [])
             ]
 
+            next_page_token = response.get("nextPageToken")
+
             return GoogleDriveSearchResult(
                 files=files,
+                returned=len(files),
                 total=len(files),
+                next_page_token=next_page_token,
+                has_more=bool(next_page_token),
             )
 
         except HttpError as exc:
@@ -1049,8 +1082,15 @@ class GoogleDriveService:
     def list_trash(
         self,
         page_size: int = 50,
+        page_token: str | None = None,
     ) -> GoogleDriveSearchResult:
-        """List the files currently in the bin."""
+        """
+        List the files currently in the bin.
+
+        Paginated for the same reason as the other two: a bin listing
+        that quietly stops at 50 is how "I emptied it" gets said about a
+        bin that is not empty.
+        """
 
         try:
             service = self._get_service()
@@ -1060,7 +1100,9 @@ class GoogleDriveService:
                 .list(
                     q="trashed = true",
                     pageSize=max(1, min(page_size, 1000)),
+                    pageToken=page_token,
                     fields=(
+                        "nextPageToken,"
                         "files(id,name,mimeType,"
                         "modifiedTime,webViewLink)"
                     ),
@@ -1079,9 +1121,14 @@ class GoogleDriveService:
                 for item in response.get("files", [])
             ]
 
+            next_page_token = response.get("nextPageToken")
+
             return GoogleDriveSearchResult(
                 files=files,
+                returned=len(files),
                 total=len(files),
+                next_page_token=next_page_token,
+                has_more=bool(next_page_token),
             )
 
         except HttpError as exc:

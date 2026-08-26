@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -102,6 +102,12 @@ def _summary(agent: Agent, tools: list[AgentTool]) -> AgentSummary:
         updated_at=agent.updated_at,
         tool_count=len(enabled),
         namespaces=sorted({t.namespace for t in enabled}),
+
+        # Every service with a row, enabled or not. `namespaces` above
+        # answers "what can it use right now"; this answers "which
+        # services is it configured for at all", which is the thing the
+        # Services section edits and the permissions page filters by.
+        services=sorted({t.namespace for t in tools if t.namespace}),
     )
 
 
@@ -686,6 +692,203 @@ async def archive_agent(
     )
 
     await session.flush()
+
+
+async def set_services(
+    session: AsyncSession,
+    engine: AgentEngine,
+    user_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    services: list[str],
+    *,
+    actor_user_id: uuid.UUID | None = None,
+    ip_address: str | None = None,
+) -> AgentDetail:
+    """
+    Replace which SERVICES this agent draws tools from.
+
+    THE BUG THIS CLOSES
+
+    An agent only ever sees tools from a namespace it holds rows for.
+    Rows were written once, in the create wizard, and nothing added a
+    namespace afterwards:
+
+        create_agent        writes rows for the services you ticked
+        sync_agent_tools    adds new tools, but only for namespaces the
+                            agent ALREADY has - deliberately, so that
+                            connecting a service does not silently
+                            widen every existing agent
+        grant_scope         never touched agent_tools at all
+
+    So connecting Google Drive and granting "google_drive:*:read" left
+    the agent with a permission it could not use: gate 2 of
+    DatabaseScopePolicy passed, gate 1 had no row to pass. The chat
+    reported the tool as "switched off in this agent's tool settings" -
+    pointing at a screen that had no such switch, because the per-tool
+    checkbox grid was removed when scopes replaced it.
+
+    This is the missing lever, at the granularity people actually think
+    in: a SERVICE, not 26 individual Drive tools.
+
+    ADDING SEEDS READ SCOPES, NEVER WRITE
+
+    Same rule as create_agent, and for the same reason: adding Google
+    Drive to an agent is consent for it to LOOK at Drive. It is not
+    consent to delete files. A write scope stays a separate, deliberate
+    switch on the permissions page.
+
+    REMOVING REVOKES THAT SERVICE'S SCOPES TOO
+
+    Not tidiness - correctness. The permissions page now lists only the
+    services an agent actually has, so a grant left behind for a removed
+    service would be live and invisible at once, and a permission you
+    cannot see is a permission you cannot take away. Removing the
+    service removes both halves, and the audit trail records every
+    revocation individually.
+
+    Idempotent: a PUT that changes nothing writes nothing.
+    """
+
+    agent = await _owned_agent(session, user_id, agent_id, with_tools=True)
+
+    known = set(engine.registry.servers())
+
+    wanted = {s.strip() for s in services if s and s.strip()}
+
+    unknown = sorted(wanted - known)
+
+    if unknown:
+        raise UnknownPlugin(", ".join(unknown))
+
+    current = {row.namespace for row in agent.tools if row.namespace}
+
+    to_add = sorted(wanted - current)
+    to_remove = sorted(current - wanted)
+
+    if not to_add and not to_remove:
+        # No write, no audit row, no bumped updated_at. A UI that
+        # re-saves an unchanged form must not produce a history that
+        # reads like the user kept changing their mind.
+        return await get_agent(session, engine, user_id, agent_id)
+
+    # Loaded once, not per namespace: the seeding below has to know
+    # which scopes already exist so a re-add does not write a duplicate
+    # grant (and a duplicate audit row saying it was granted twice).
+    existing_scopes = set(
+        await session.scalars(
+            select(AgentScope.scope).where(AgentScope.agent_id == agent.id)
+        )
+    )
+
+    for namespace in to_add:
+
+        tools = engine.registry.by_namespace(namespace)
+
+        # Same defaults as a brand-new agent, from the same function,
+        # so a service added today is configured identically to one
+        # ticked in the create wizard.
+        for row in _default_rows(tools, {}):
+            session.add(AgentTool(agent_id=agent.id, **row))
+
+        for scope in sorted(default_scopes(tools)):
+
+            if scope in existing_scopes:
+                continue
+
+            existing_scopes.add(scope)
+
+            session.add(
+                AgentScope(
+                    agent_id=agent.id,
+                    scope=scope,
+                    granted_by=actor_user_id or user_id,
+                )
+            )
+
+            # In the SAME transaction as the grant. A log missing the
+            # one event somebody is investigating is worse than no log,
+            # because it is believed.
+            audit_service.record(
+                session,
+                AuditAction.SCOPE_GRANTED,
+                user_id=user_id,
+                actor_user_id=actor_user_id or user_id,
+                resource_type=ResourceType.AGENT,
+                resource_id=agent.id,
+                ip_address=ip_address,
+                scope=scope,
+                namespace=namespace,
+            )
+
+        audit_service.record(
+            session,
+            AuditAction.TOOL_ENABLED,
+            user_id=user_id,
+            actor_user_id=actor_user_id or user_id,
+            resource_type=ResourceType.AGENT,
+            resource_id=agent.id,
+            ip_address=ip_address,
+            namespace=namespace,
+            tool_count=len(tools),
+        )
+
+    for namespace in to_remove:
+
+        await session.execute(
+            delete(AgentTool).where(
+                AgentTool.agent_id == agent.id,
+                AgentTool.namespace == namespace,
+            )
+        )
+
+        # Selected before the delete so each revocation can be named.
+        # "Revoked 15 scopes" is not an audit trail; fifteen rows are.
+        doomed = sorted(
+            scope
+            for scope in existing_scopes
+            if scope.split(":", 1)[0] == namespace
+        )
+
+        if doomed:
+            await session.execute(
+                delete(AgentScope).where(
+                    AgentScope.agent_id == agent.id,
+                    AgentScope.scope.in_(doomed),
+                )
+            )
+
+        for scope in doomed:
+
+            existing_scopes.discard(scope)
+
+            audit_service.record(
+                session,
+                AuditAction.SCOPE_REVOKED,
+                user_id=user_id,
+                actor_user_id=actor_user_id or user_id,
+                resource_type=ResourceType.AGENT,
+                resource_id=agent.id,
+                ip_address=ip_address,
+                scope=scope,
+                namespace=namespace,
+            )
+
+        audit_service.record(
+            session,
+            AuditAction.TOOL_DISABLED,
+            user_id=user_id,
+            actor_user_id=actor_user_id or user_id,
+            resource_type=ResourceType.AGENT,
+            resource_id=agent.id,
+            ip_address=ip_address,
+            namespace=namespace,
+        )
+
+    await session.flush()
+
+    # get_agent re-reads the rows rather than trusting agent.tools,
+    # which this function has just invalidated in both directions.
+    return await get_agent(session, engine, user_id, agent_id)
 
 
 # ---------------------------------------------------------------------

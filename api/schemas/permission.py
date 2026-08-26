@@ -46,6 +46,21 @@ class ScopeOption(BaseModel):
     # permission becomes invisible and cannot be revoked.
     connected: bool = False
 
+    # Does THIS AGENT draw tools from the service?
+    #
+    # A different question from `connected`, and the one that was
+    # missing. `connected` is a fact about the user's account and is
+    # true of all their agents at once; this is a fact about one agent,
+    # and it is false by default - an agent only ever sees tools from a
+    # namespace it holds rows for.
+    #
+    # Scopes over a service the agent does not have are filtered out of
+    # `available` entirely, so in practice this is True on almost every
+    # option. It is False only for the case that MUST stay visible: a
+    # live grant over a service the agent no longer has, which the UI
+    # flags so it can be revoked or the service re-added.
+    on_agent: bool = True
+
 
 class AgentScopes(BaseModel):
     """

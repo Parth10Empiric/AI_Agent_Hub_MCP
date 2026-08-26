@@ -288,14 +288,31 @@ function ChatSurface({
   conversationId: string;
   disabled?: boolean;
 }) {
-  const { history, historyLoading, live, send, cancel } =
-    useChat(conversationId);
+  const {
+    history,
+    historyLoading,
+    live,
+    send,
+    cancel,
+    hasMore,
+    loadingOlder,
+    loadOlder,
+  } = useChat(conversationId);
 
   const busy = live !== null && live.phase !== "idle";
 
+  // The scrolling element. Declared here because this component owns
+  // the layout, and handed to MessageList because the BEHAVIOUR -
+  // paging at the top, following at the bottom - belongs with the rows
+  // that cause it.
+  const scrollRef = useRef<HTMLDivElement>(null);
+
   return (
     <>
-      <div className="min-h-0 flex-1 overflow-y-auto px-1 py-6">
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto px-1 py-6"
+      >
         {historyLoading ? (
           <Skeleton className="h-32 w-full" />
         ) : history.length === 0 && !live ? (
@@ -309,7 +326,16 @@ function ChatSurface({
             </p>
           </div>
         ) : (
-          <MessageList history={history} live={live} agentId={agentId} />
+          <MessageList
+            history={history}
+            live={live}
+            agentId={agentId}
+            scrollParentRef={scrollRef}
+            hasMore={hasMore}
+            loadingOlder={loadingOlder}
+            onLoadOlder={loadOlder}
+            conversationKey={conversationId}
+          />
         )}
       </div>
 

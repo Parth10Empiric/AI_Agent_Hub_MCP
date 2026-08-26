@@ -8,6 +8,7 @@ from api.deps import AgentEngineDep, CurrentUser, DbDep
 from api.schemas.agent import (
     AgentCreate,
     AgentDetail,
+    AgentServicesUpdate,
     AgentSummary,
     AgentToolsUpdate,
     AgentUpdate,
@@ -186,3 +187,50 @@ async def set_tools(
 
     except AgentNotFound:
         raise _not_found() from None
+
+
+@router.put("/{agent_id}/services", response_model=AgentDetail)
+async def set_services(
+    agent_id: uuid.UUID,
+    payload: AgentServicesUpdate,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbDep,
+    engine: AgentEngineDep,
+) -> AgentDetail:
+    """
+    Set which services this agent draws tools from.
+
+    THE WHOLE SET, not a delta. The screen behind this is a list of
+    ticks and one Save button, and a PUT is the only shape that cannot
+    apply half of what the user chose.
+
+    Adding a service writes its tool rows and seeds READ scopes for it -
+    the same thing the create wizard does, because "add Google Drive to
+    this agent" means the same thing whenever it is said. Removing one
+    deletes its rows AND revokes its scopes, so nothing is left granted
+    on a screen that no longer lists it.
+
+    400 rather than 404 for an unknown service: the agent exists, the
+    request is wrong.
+    """
+
+    try:
+        return await agent_service.set_services(
+            session,
+            engine,
+            current_user.id,
+            agent_id,
+            payload.services,
+            actor_user_id=current_user.id,
+            ip_address=request.client.host if request.client else None,
+        )
+
+    except AgentNotFound:
+        raise _not_found() from None
+
+    except UnknownPlugin as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown service: {exc}",
+        ) from None

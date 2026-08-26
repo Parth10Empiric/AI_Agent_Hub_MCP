@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
+from ollama import ResponseError
 from sse_starlette.sse import EventSourceResponse
 
 from api.db.models import Conversation
@@ -33,6 +34,70 @@ router = APIRouter(prefix="/api/conversations", tags=["chat"])
 # Ends the queue. A sentinel rather than a flag because the consumer is
 # blocked on queue.get() and needs something to arrive.
 _DONE = object()
+
+
+def _model_error_detail(status: int, message: str) -> str:
+    """
+    One sentence naming the model provider, the cause, and the fix.
+
+    The provider's own words are kept - they carry the specifics, like
+    which limit and where to raise it - with a lead that says WHOSE
+    problem this is. Without that lead, "you have reached your weekly
+    usage limit" reads as a limit inside this product.
+    """
+
+    lead = {
+        401: "Your model provider rejected the request (not signed in).",
+        403: "Your model provider rejected the request.",
+        404: "The configured model was not found.",
+        429: "Your model provider's usage limit has been reached.",
+    }.get(status, "The model provider could not answer this request.")
+
+    # Bounded, and stripped of our own wrapper noise. A provider that
+    # returns a wall of text must not fill the chat with it.
+    detail = message.strip()[:300]
+
+    return f"{lead} {detail}".strip()
+
+
+async def _record_failure(
+    sessionmaker: Any,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    completed: list[dict],
+    reason: str,
+    *,
+    question: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """
+    Close off a conversation whose turn died, and never raise.
+
+    A SECOND session, because the first one's transaction is already
+    rolled back - reusing it would fail on the first statement, which
+    is precisely the situation this is here to survive.
+
+    Swallows everything. This runs on the failure path; a failure here
+    would replace an actionable error event with a stack trace nobody
+    asked for, and the user would still be looking at a question with
+    no answer under it.
+    """
+
+    try:
+        async with sessionmaker() as db:
+            await chat_service.record_failed_turn(
+                db,
+                user_id,
+                conversation_id,
+                completed,
+                reason=reason,
+                question=question,
+                detail=detail,
+            )
+            await db.commit()
+
+    except Exception:
+        logger.exception("could not record the failed turn")
 
 
 @router.post("/{conversation_id}/messages/stream")
@@ -116,6 +181,14 @@ async def stream_message(
 
     queue: asyncio.Queue = asyncio.Queue()
 
+    # Every tool that finished, kept outside the turn's transaction.
+    #
+    # These are the only surviving copy if the turn dies before its
+    # final commit - the ExecutionRecord objects go with it, and the
+    # rows it would have written are rolled back. See
+    # chat_service.record_failed_turn for the session this exists for.
+    completed: list[dict] = []
+
     def on_event(name: str, data: dict) -> None:
         """
         Called by run_agent, from inside the turn.
@@ -140,6 +213,9 @@ async def stream_message(
 
         if name == "done":
             name = "answer_ready"
+
+        if name == "tool_end":
+            completed.append(data)
 
         queue.put_nowait((name, data))
 
@@ -212,6 +288,58 @@ async def stream_message(
         except AgentUnavailable as exc:
             queue.put_nowait(("error", {"detail": str(exc), "code": "conflict"}))
 
+        except ResponseError as exc:
+            # THE MODEL PROVIDER REFUSED, AND SAID WHY.
+            #
+            # Ollama answers 429 with "you have reached your weekly
+            # usage limit", 401 when a cloud session has expired, 400
+            # when the model cannot do what was asked. Every one of
+            # those is fixable by the person reading it - and every one
+            # of them used to arrive as "The agent turn failed", which
+            # is fixable by nobody.
+            #
+            # Same rule as ToolError.detail: the service's own sentence
+            # is the actionable part, so it is passed through rather
+            # than replaced by our category for it. It is a quota
+            # message from a model host, not user data - there is
+            # nothing in it to leak.
+            status = getattr(exc, "status_code", 0) or 0
+
+            logger.warning("model provider refused: %s %s", status, exc)
+
+            detail = _model_error_detail(status, str(exc))
+
+            # The SAME sentence, in the transcript and on the stream.
+            # A live message that vanishes on reload is worse than one
+            # that was never shown - the reader is left knowing they
+            # saw something and not what it said.
+            await _record_failure(
+                sessionmaker,
+                user_id,
+                conversation_id,
+                completed,
+                type(exc).__name__,
+                question=content,
+                detail=detail,
+            )
+
+            queue.put_nowait(
+                (
+                    "error",
+                    {
+                        "detail": detail,
+                        # A quota is not a fault. Reported with the same
+                        # code as our own rate limit so the UI words it
+                        # the same calm way - see the amber notice in
+                        # message-list.tsx.
+                        "code": (
+                            "rate_limited" if status == 429 else "model_error"
+                        ),
+                        "retry_after": 0,
+                    },
+                )
+            )
+
         except ConversationNotFound:
             queue.put_nowait(
                 ("error", {"detail": "Conversation not found.", "code": "not_found"})
@@ -222,6 +350,28 @@ async def stream_message(
             # status code left to change, so the failure is reported as
             # an event and logged in full on the server side.
             logger.exception("streaming turn failed")
+
+            # AND THE CONVERSATION IS CLOSED OFF, in a fresh session.
+            #
+            # The turn's own session has just been rolled back, so the
+            # user message survives only because an approval committed
+            # mid-turn - and the assistant message, along with every
+            # execution row, is gone. What is NOT gone is the work
+            # itself: issues created, messages sent. Leaving the
+            # transcript with a question and no answer tells the user
+            # their request was ignored, when in fact it half happened.
+            #
+            # Its own try/except because a caller must never fail twice:
+            # if this write fails too, the error event below is still
+            # the thing the user needs.
+            await _record_failure(
+                sessionmaker,
+                user_id,
+                conversation_id,
+                completed,
+                type(exc).__name__,
+                question=content,
+            )
 
             queue.put_nowait(
                 (

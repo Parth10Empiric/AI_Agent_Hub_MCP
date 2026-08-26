@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+import { ServicesSection } from "@/components/agents/services-section";
 import { UsageMeter } from "@/components/limits/usage-meter";
 import { archiveAgent, getAgentTools, updateAgent } from "@/lib/api/agents";
 import { getAgentScopes } from "@/lib/api/permissions";
@@ -209,6 +210,19 @@ export default function AgentSettingsPage({
         </Button>
       </section>
 
+      {/* WHICH SERVICES THIS AGENT HAS AT ALL.
+
+          ABOVE the permissions section because it is the question that
+          comes first, and because getting the order wrong is what the
+          missing screen cost: a user granted "read Google Drive",
+          believed the agent could read Drive, and it could not - the
+          agent had never been given the service, so there were no Drive
+          tools for the permission to cover.
+
+          Permissions below now list only the services in this list, so
+          the two screens can no longer disagree. */}
+      <ServicesSection agentId={id} services={agent.data.services ?? []} />
+
       {/* WHAT THIS AGENT CAN DO - ONE ANSWER, IN ONE PLACE.
 
           There used to be a grid of 108 checkboxes here as well, and it
@@ -277,11 +291,16 @@ export default function AgentSettingsPage({
             {/* The bottom line, after de-duplicating tools that more
                 than one permission covers. Two permissions of "7 tools"
                 do not make 14. */}
+            {/* The denominator is the tools from the services ABOVE,
+                not everything the server exposes. Saying which is the
+                difference between "108 of 108, everything is fine" and
+                "108 of 108 - and Google Drive is not in that 108". */}
             <p className="text-sm text-muted-foreground">
               <strong className="tabular-nums text-foreground">
                 {allowedCount}
               </strong>{" "}
-              of {allTools.length} tools are available to this agent.
+              of {allTools.length} tools from this agent&apos;s services
+              are available to it.
             </p>
           </>
         )}

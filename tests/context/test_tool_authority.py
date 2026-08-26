@@ -70,6 +70,35 @@ def test_the_agents_own_prompt_survives_intact():
     assert "Reply only in French." in content
 
 
+def test_it_covers_the_toolset_shrinking_too():
+    """
+    The rule used to cover only growth.
+
+    Routing narrows the toolset every turn - it offers what matches the
+    current message - so a change of subject removes the last subject's
+    tools. Faced with a GitHub transcript and no GitHub tool, the model
+    reconciled them by disowning its own real work: "I made up those
+    tools." It had listed the user's actual repositories two messages
+    earlier.
+
+    "I cannot do that right now" is recoverable. "I lied to you
+    earlier" is not - it teaches the user to distrust the results that
+    were true.
+    """
+
+    lowered = TOOL_AUTHORITY.lower()
+
+    assert "shrink" in lowered
+    assert "made the result up" in lowered or "made up" in lowered
+    assert "unavailable" in lowered
+
+
 def test_it_stays_short():
     # It is paid for on every single turn, forever.
-    assert len(TOOL_AUTHORITY) < 500
+    #
+    # Raised from 500 when the shrinking case was added. That case cost
+    # a session in which the agent told the user it had fabricated a
+    # tool call it had really made, so the extra ~110 characters buy
+    # something specific - the bound exists to stop drift, not to stop
+    # the rule being complete.
+    assert len(TOOL_AUTHORITY) < 700

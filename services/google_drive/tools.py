@@ -26,22 +26,32 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
     def google_drive_search_files(
         query: str,
         page_size: int = 20,
+        page_token: str | None = None,
     ) -> dict[str, Any]:
         """
         Search Google Drive files by name.
 
+        Matches on the NAME only. To list what is in a folder - or the
+        whole of My Drive - use google_drive_list_folder instead; an
+        empty query here does not mean "everything".
+
         Args:
             query: Text to search for in file names.
-            page_size: Maximum number of files to return.
+            page_size: Maximum number of files to return per call.
+            page_token: Pass `next_page_token` from a previous result to
+                fetch the next page. Omit for the first page.
 
         Returns:
-            Matching Google Drive files.
+            One page of matching files. `has_more` is true when more
+            remain; call again with `page_token=next_page_token` and
+            combine the pages before answering.
         """
 
         try:
             result = drive_service.search_files(
                 query=query,
                 page_size=page_size,
+                page_token=page_token,
             )
 
             return {
@@ -81,24 +91,35 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
 
     @mcp.tool()
     def google_drive_list_folder(
-        folder_id: str,
+        folder_id: str = "root",
         page_size: int = 100,
+        page_token: str | None = None,
     ) -> dict[str, Any]:
         """
         List files and folders inside a Google Drive folder.
 
+        Call with no arguments to list the top level of the user's
+        Drive - do not ask them for a folder ID first.
+
         Args:
-            folder_id: Google Drive folder ID.
-            page_size: Maximum number of items to return.
+            folder_id: Google Drive folder ID, or "root" (the default)
+                for the top level of My Drive. Pass the `id` of a folder
+                from a previous result to look inside it.
+            page_size: Maximum number of items to return per call.
+            page_token: Pass `next_page_token` from a previous result to
+                fetch the next page. Omit for the first page.
 
         Returns:
-            Files and folders inside the folder.
+            One page of the folder's contents. `has_more` is true when
+            more remain; call again with `page_token=next_page_token`
+            and combine the pages before answering.
         """
 
         try:
             result = drive_service.list_folder(
                 folder_id=folder_id,
                 page_size=page_size,
+                page_token=page_token,
             )
 
             return {
@@ -490,19 +511,27 @@ def register_google_drive_tools(mcp: MCPServer) -> None:
     @mcp.tool()
     def google_drive_list_trash(
         page_size: int = 50,
+        page_token: str | None = None,
     ) -> dict[str, Any]:
         """
         List the files currently in the Google Drive bin.
 
         Args:
-            page_size: Maximum number of files to return.
+            page_size: Maximum number of files to return per call.
+            page_token: Pass `next_page_token` from a previous result to
+                fetch the next page. Omit for the first page.
 
         Returns:
-            The files waiting in the bin.
+            One page of the bin's contents. `has_more` is true when more
+            remain; call again with `page_token=next_page_token` and
+            combine the pages before answering.
         """
 
         try:
-            result = drive_service.list_trash(page_size=page_size)
+            result = drive_service.list_trash(
+                page_size=page_size,
+                page_token=page_token,
+            )
 
             return {
                 "success": True,

@@ -1,7 +1,7 @@
 "use client";
 
 import { getAccessToken } from "@/lib/api/tokens";
-import { API_BASE } from "@/lib/api/client";
+import { API_BASE, refreshAccessToken } from "@/lib/api/client";
 
 /**
  * Reading a Server-Sent Events stream from a POST request.
@@ -70,22 +70,59 @@ export async function streamTurn(
   content: string,
   { signal, onEvent }: StreamOptions,
 ): Promise<void> {
-  const token = getAccessToken();
-
-  const response = await fetch(
-    `${API_BASE}/api/conversations/${conversationId}/messages/stream`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  /**
+   * One attempt, with whatever token we hold.
+   *
+   * Split out so a 401 can be retried after a refresh. See below - and
+   * note that retrying is safe here precisely because a 401 means the
+   * request was REJECTED: it never reached chat_service, so no turn ran
+   * and nothing was sent twice.
+   */
+  const attempt = (token: string | null) =>
+    fetch(
+      `${API_BASE}/api/conversations/${conversationId}/messages/stream`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: "include",
+        body: JSON.stringify({ content }),
+        signal,
       },
-      credentials: "include",
-      body: JSON.stringify({ content }),
-      signal,
-    },
-  );
+    );
+
+  let response = await attempt(getAccessToken());
+
+  // THE ONE CALL IN THIS APP THAT DID NOT REFRESH ITS TOKEN.
+  //
+  // Every other request goes through `api()`, which catches a 401,
+  // refreshes once and retries. This function talks to fetch directly -
+  // it has to, because it reads a stream and `api()` parses JSON - and
+  // in doing so it quietly opted out of the whole session-renewal
+  // mechanism.
+  //
+  // Access tokens last 15 minutes. So a chat left open for a quarter of
+  // an hour answered the next message with:
+  //
+  //     Thinking… 24s
+  //     Invalid or expired token
+  //
+  // ...while every other panel on the page carried on working, because
+  // they were all refreshing and this one was not.
+  //
+  // `refreshAccessToken` is shared with `api()` on purpose: it holds a
+  // single in-flight promise, so a 401 here and a 401 from a sidebar
+  // query resolve through ONE refresh. The backend rotates refresh
+  // tokens on every use, and two concurrent refreshes would invalidate
+  // each other.
+  if (response.status === 401) {
+    const refreshed = await refreshAccessToken();
+
+    if (refreshed) response = await attempt(refreshed);
+  }
 
   if (!response.ok || !response.body) {
     // Read the body before throwing - it usually carries the reason,

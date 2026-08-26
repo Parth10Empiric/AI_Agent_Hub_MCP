@@ -68,3 +68,30 @@ export function archiveAgent(id: string): Promise<void> {
 export function getAgentTools(id: string): Promise<AgentDetail> {
   return api<AgentDetail>(`/api/agents/${id}/tools`);
 }
+
+
+/**
+ * Set which SERVICES this agent draws tools from.
+ *
+ * THE LEVER THAT WAS MISSING.
+ *
+ * An agent only ever sees tools from a service it was given, and until
+ * this existed the only place to give it one was the create wizard.
+ * Connect Google Drive afterwards and every existing agent stayed
+ * blind to it - while the permissions page happily let you grant
+ * "google_drive:*:read", because that is a different gate.
+ *
+ * The whole set goes in one PUT, matching the screen: a list of ticks
+ * and one Save. Adding a service seeds READ permissions for it;
+ * removing one revokes that service's permissions with it, so nothing
+ * stays granted on a page that no longer lists it.
+ */
+export function setAgentServices(
+  id: string,
+  services: string[],
+): Promise<AgentDetail> {
+  return api<AgentDetail>(`/api/agents/${id}/services`, {
+    method: "PUT",
+    json: { services },
+  });
+}

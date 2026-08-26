@@ -126,9 +126,29 @@ class Message(UUIDMixin, Base):
 
     token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
+    # clock_timestamp(), NOT now().
+    #
+    # PostgreSQL's now() is the TRANSACTION START time, identical for
+    # every row a transaction writes - and a turn writes the question
+    # and the answer in one transaction. So both rows carried the same
+    # microsecond:
+    #
+    #     2026-08-26 05:32:10.373557  assistant  "Hmm, my friend..."
+    #     2026-08-26 05:32:10.373557  user       "list out all repo name"
+    #
+    # An ordering with no tiebreak then puts them in whichever order
+    # the index happens to yield, so a reply can sort ABOVE the question
+    # it answers. The UI compensates by tie-breaking on role, which
+    # works and hides the fact that the data itself is ambiguous.
+    #
+    # clock_timestamp() reads the wall clock at the moment of the
+    # INSERT, so rows written in one transaction are ordered by when
+    # they were actually written. Still stamped by the database - the
+    # reason server_default was chosen in the first place - so two app
+    # servers with drifting clocks cannot disagree about order.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
 
     conversation: Mapped["Conversation"] = relationship(

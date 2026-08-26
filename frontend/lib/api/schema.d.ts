@@ -448,6 +448,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/{agent_id}/services": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Services
+         * @description Set which services this agent draws tools from.
+         *
+         *     THE WHOLE SET, not a delta. The screen behind this is a list of
+         *     ticks and one Save button, and a PUT is the only shape that cannot
+         *     apply half of what the user chose.
+         *
+         *     Adding a service writes its tool rows and seeds READ scopes for it -
+         *     the same thing the create wizard does, because "add Google Drive to
+         *     this agent" means the same thing whenever it is said. Removing one
+         *     deletes its rows AND revokes its scopes, so nothing is left granted
+         *     on a screen that no longer lists it.
+         *
+         *     400 rather than 404 for an unknown service: the agent exists, the
+         *     request is wrong.
+         */
+        put: operations["set_services_api_agents__agent_id__services_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents/{agent_id}/scopes": {
         parameters: {
             query?: never;
@@ -908,6 +941,8 @@ export interface components {
             tool_count: number;
             /** Namespaces */
             namespaces?: string[];
+            /** Services */
+            services?: string[];
             /** System Prompt */
             system_prompt: string;
             /** Tools */
@@ -927,6 +962,19 @@ export interface components {
             granted?: components["schemas"]["ScopeRead"][];
             /** Available */
             available?: components["schemas"]["ScopeOption"][];
+        };
+        /**
+         * AgentServicesUpdate
+         * @description Body for PUT /agents/{id}/services - the complete desired set.
+         *
+         *     A PUT of the WHOLE set rather than add/remove endpoints, because
+         *     the UI edits it as a whole: the user ticks and unticks a list and
+         *     presses Save. Two endpoints would let a client apply half of that
+         *     and leave the agent in a state the user never chose.
+         */
+        AgentServicesUpdate: {
+            /** Services */
+            services?: string[];
         };
         /**
          * AgentSummary
@@ -967,6 +1015,8 @@ export interface components {
             tool_count: number;
             /** Namespaces */
             namespaces?: string[];
+            /** Services */
+            services?: string[];
         };
         /**
          * AgentToolRead
@@ -1919,6 +1969,11 @@ export interface components {
              * @default false
              */
             connected: boolean;
+            /**
+             * On Agent
+             * @default true
+             */
+            on_agent: boolean;
         };
         /**
          * ScopeRead
@@ -2647,6 +2702,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["AgentToolsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_services_api_agents__agent_id__services_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentServicesUpdate"];
             };
         };
         responses: {

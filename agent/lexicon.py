@@ -551,6 +551,30 @@ STOPWORDS: frozenset[str] = frozenset({
     "each", "every", "both", "either", "neither",
     "how", "why", "after", "before", "while",
     "only", "own", "same", "other", "such", "even", "ever", "never",
+
+    # THE AFFIRMATIVES. The same bug as "use" -> "user" above, on the
+    # single most common follow-up word in the language - and "no" was
+    # already here while "yes" was not.
+    #
+    #     "yes" -> "yesterday"   0.94   a Google Calendar alias
+    #
+    # From a real session. The user listed their GitHub repositories,
+    # asked to delete one, was asked to confirm, and typed "Yes, delete
+    # it". That message scored google_calendar at 0.940 - on the
+    # strength of "yes" - and scored nothing else. GitHub was not
+    # offered at all, so the agent reported that it had no GitHub tools
+    # and had "made up" the repository list it had genuinely fetched two
+    # messages earlier.
+    #
+    # Worse, a namespace HAD scored, so the previous-turn carry-over in
+    # router.route never fired: that path only runs when the message
+    # names no service, and this message named the wrong one confidently.
+    #
+    # A confirmation carries no topic by definition - it inherits the
+    # topic of the question it answers. None of these is an intent verb,
+    # which is the rule this list must never break.
+    "yes", "yeah", "yep", "yup", "yah", "ya",
+    "sure", "agreed", "absolutely", "definitely", "affirmative",
 })
 
 

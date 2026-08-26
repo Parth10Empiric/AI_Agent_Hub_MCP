@@ -130,6 +130,24 @@ class AgentSummary(BaseModel):
     tool_count: int = 0
     namespaces: list[str] = Field(default_factory=list)
 
+    # WHICH SERVICES THIS AGENT DRAWS TOOLS FROM.
+    #
+    # Not the same question as `namespaces`, and the difference is the
+    # bug this field exists to make visible.
+    #
+    #     namespaces   services with at least one ENABLED tool row
+    #     services     services this agent has ANY row for
+    #
+    # An agent only ever sees tools from a service it has rows for -
+    # sync_agent_tools deliberately never adds a namespace on its own,
+    # so connecting Google Drive later gives an existing agent nothing.
+    # Until this was reported, the only symptom was the agent insisting
+    # a tool was "switched off" on a settings screen with no switch.
+    #
+    # This is what the Services section edits, and what the permissions
+    # page filters by.
+    services: list[str] = Field(default_factory=list)
+
 
 class AgentDetail(AgentSummary):
     system_prompt: str
@@ -140,3 +158,16 @@ class AgentToolsUpdate(BaseModel):
     """Body for PUT /agents/{id}/tools - the complete desired set."""
 
     tools: dict[str, AgentToolWrite]
+
+
+class AgentServicesUpdate(BaseModel):
+    """
+    Body for PUT /agents/{id}/services - the complete desired set.
+
+    A PUT of the WHOLE set rather than add/remove endpoints, because
+    the UI edits it as a whole: the user ticks and unticks a list and
+    presses Save. Two endpoints would let a client apply half of that
+    and leave the agent in a state the user never chose.
+    """
+
+    services: list[str] = Field(default_factory=list)
