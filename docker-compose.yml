@@ -130,6 +130,14 @@ services:
       OLLAMA_HOST: http://host.docker.internal:11434
 
       MCP_ENVIRONMENT: development
+
+      # Log format, overridable from .env or the shell (Phase 6.5).
+      #
+      # Empty means "decide from the environment": text in development,
+      # JSON in production. Set MCP_LOG_FORMAT=json to see production's
+      # output locally without pretending to BE production - which
+      # would trip the preflight gate in api/preflight.py.
+      MCP_LOG_FORMAT: ${MCP_LOG_FORMAT:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

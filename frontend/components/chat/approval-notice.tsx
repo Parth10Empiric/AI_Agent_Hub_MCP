@@ -38,6 +38,22 @@ import type { ExecutionRead } from "@/lib/types";
  * stream; this component simply no longer needs it.
  */
 export interface RefusedCall {
+  /**
+   * The execution's own id - the ONLY thing on this object that is
+   * unique per refusal.
+   *
+   * A turn can call the same tool twice ("make two folders") and have
+   * both refused, at which point tool_name, operation and risk_level
+   * are identical on two different entries. React keys must be unique
+   * among siblings; keyed by tool_name those two rows collide, and
+   * React warns and may reuse or drop one of them across a re-render.
+   *
+   * Optional because a caller may build a RefusedCall by hand, with no
+   * stored execution behind it. Everything the app renders today comes
+   * from refusedFromExecutions(), so in practice this is always set.
+   */
+  id?: string;
+
   tool_name: string;
   operation: string;
   risk_level: string;
@@ -112,6 +128,7 @@ export function refusedFromExecutions(
         execution !== undefined && execution.status === "denied",
     )
     .map((execution) => ({
+      id: execution.id,
       tool_name: execution.tool_name,
       operation: execution.operation,
       risk_level: execution.risk_level,
@@ -216,12 +233,18 @@ export function ApprovalNotice({
       </p>
 
       <ul className="mt-3 space-y-1.5">
-        {approvals.map((approval) => {
+        {approvals.map((approval, index) => {
           const risk = safeRisk(approval.risk_level);
 
           return (
             <li
-              key={approval.tool_name}
+              // The execution id, not the tool name: one turn can be
+              // refused the same tool more than once, and two <li> with
+              // the same key is a React error. The index fallback only
+              // runs for a hand-built RefusedCall with no execution
+              // behind it - this list is never reordered or filtered
+              // after mount, so an index is a safe last resort here.
+              key={approval.id ?? `${approval.tool_name}-${index}`}
               className="flex flex-wrap items-center gap-2"
             >
               <span aria-hidden className="font-mono text-amber-700 dark:text-amber-400">

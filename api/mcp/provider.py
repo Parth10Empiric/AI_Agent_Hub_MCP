@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -30,6 +31,32 @@ logger = get_logger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 MCP_SERVER_SCRIPT = PROJECT_ROOT / "server.py"
+
+
+# Variables the MCP subprocess needs beyond the SDK's minimal set.
+#
+# Logging only. The whole point of the SDK's allow-list is that a
+# subprocess receives nothing it was not explicitly given, and Phase
+# 5.5 already delivers per-user credentials through MCP request
+# metadata rather than the environment - so nothing credential-shaped
+# has any business here.
+_PASSTHROUGH_ENV = ("MCP_LOG_LEVEL", "MCP_LOG_FORMAT", "MCP_ENVIRONMENT")
+
+
+def _subprocess_env() -> dict[str, str]:
+    """The SDK's safe default environment, plus our logging settings."""
+
+    from mcp.client.stdio import get_default_environment
+
+    env = dict(get_default_environment())
+
+    for name in _PASSTHROUGH_ENV:
+        value = os.getenv(name)
+
+        if value is not None:
+            env[name] = value
+
+    return env
 
 
 @runtime_checkable
@@ -148,6 +175,25 @@ class SharedSessionProvider:
                             # Google token, credentials.json - against
                             # it.
                             cwd=str(PROJECT_ROOT),
+
+                            # The MCP SDK does NOT pass our environment
+                            # through. get_default_environment() hands
+                            # the child five variables - HOME, LOGNAME,
+                            # PATH, SHELL, USER - and drops everything
+                            # else, deliberately, so a server cannot
+                            # read secrets it was never given.
+                            #
+                            # Sound default, one consequence: server.py
+                            # could not see MCP_LOG_FORMAT, so in a
+                            # container with no .env file it logged in
+                            # the human format while the parent logged
+                            # JSON. Half the stream was unparseable and
+                            # a shipper would drop it without a word.
+                            #
+                            # Only the logging variables are added.
+                            # Anything credential-shaped stays out, as
+                            # the SDK intended.
+                            env=_subprocess_env(),
                         )
                     )
                 )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -54,8 +56,17 @@ EXEMPT_PATHS = frozenset(
     {
         # Your monitor is not an attacker, and a limited health check
         # reports the outage it caused.
+        #
+        # /ready matters more than /health here, because it is polled
+        # HARDER: a load balancer checks readiness every few seconds.
+        # At a 5s interval that is 720 requests an hour against a
+        # 100/minute budget - so without this exemption the probe eats
+        # the limit, starts collecting 429s, and the balancer reads
+        # those as "unhealthy" and pulls a perfectly good container out
+        # of rotation. The monitoring causes the outage it reports.
         "/api/health",
         "/health",
+        "/ready",
         "/openapi.json",
         "/docs",
         "/redoc",
@@ -226,8 +237,35 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
         tokens = set_request_context(request_id, client_ip(request))
 
+        started = time.perf_counter()
+
         try:
             response = await call_next(request)
+
+            # THE ACCESS LOG, EMITTED HERE AND NOT BY UVICORN.
+            #
+            # uvicorn writes its own access line, and it is useless for
+            # correlation: it runs in the ASGI layer OUTSIDE this
+            # middleware, so by the time it fires the `finally` below
+            # has already reset the ContextVar and the line carries no
+            # request id. It is also a preformatted string, so the
+            # method, path and status cannot be queried as fields.
+            #
+            # Logging it here - inside the context, before the reset -
+            # gives one structured line per request with the id, the
+            # duration and the status as columns. core/logging.py
+            # silences uvicorn.access so there is exactly one.
+            logger.info(
+                "http_request",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "duration_ms": round(
+                        (time.perf_counter() - started) * 1000, 2
+                    ),
+                },
+            )
 
         finally:
             # ALWAYS. Without this a request that shares a context with

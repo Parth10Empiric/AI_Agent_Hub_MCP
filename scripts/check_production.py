@@ -42,133 +42,44 @@ WARN = " WARN "
 def main() -> int:
 
     from api.settings import get_settings
+    from api.preflight import advisories, problems, run_checks
 
     settings = get_settings()
-
-    problems: list[str] = []
-    warnings: list[str] = []
 
     production = settings.is_production
 
     print(f"environment : {settings.api_environment}\n")
 
-    # --- 5.5 the one that leaks accounts -----------------------------
+    # EVERY SYNCHRONOUS CHECK NOW LIVES IN api/preflight.py.
     #
-    # Checked FIRST because it is the worst failure on the list: a user
-    # who never connected GitHub silently gets the operator's account.
-    mcp_env = os.getenv("MCP_ENVIRONMENT", "development")
-    allow_env = os.getenv("MCP_ALLOW_ENV_CREDENTIALS")
+    # This script used to own them, which meant the application had no
+    # way to enforce the same rules at startup without a second copy -
+    # and two copies of a security check drift. The list moved; this
+    # file kept the job it is actually good at: printing a report a
+    # human reads before a deploy.
+    checks = run_checks(settings)
 
-    env_creds = (
-        allow_env.strip().lower() in {"1", "true", "yes"}
-        if allow_env is not None
-        else mcp_env.strip().lower() != "production"
-    )
+    for check in checks:
+        mark = OK if check.ok else (BAD if production else WARN)
 
-    if production and env_creds:
-        problems.append(
-            "MCP_ENVIRONMENT is not 'production' (or "
-            "MCP_ALLOW_ENV_CREDENTIALS is on), so a user who has not "
-            "connected a service gets YOUR tokens from .env. This is a "
-            "cross-tenant leak."
-        )
-        print(f"{BAD} 5.5 per-user credentials")
-    else:
-        print(f"{OK} 5.5 per-user credentials ({mcp_env})")
+        print(f"{mark} {check.name}" + (f" ({check.detail})" if check.detail else ""))
 
-    # --- 5.4 encryption ----------------------------------------------
-    try:
-        keys = settings.encryption_keys
-
-        if not keys or not keys[0]:
-            problems.append("CREDENTIAL_ENCRYPTION_KEY is empty.")
-            print(f"{BAD} 5.4 credential encryption")
-
-        else:
-            print(f"{OK} 5.4 credential encryption ({len(keys)} key(s))")
-
-            if len(keys) > 1:
-                warnings.append(
-                    f"{len(keys)} keys are configured, which means a "
-                    "rotation is in progress. Finish it with "
-                    "scripts/rotate_credentials.py --apply, then drop "
-                    "the old key."
-                )
-
-    except Exception as exc:
-        problems.append(f"credential store will not build: {exc}")
-        print(f"{BAD} 5.4 credential encryption")
-
-    # --- 5.7 rate limits ---------------------------------------------
-    if not settings.rate_limit_enabled:
-        (problems if production else warnings).append(
-            "Rate limiting is switched off. Nothing bounds cost or "
-            "blast radius - one loop is a bill, and one compromised "
-            "agent has all hour."
-        )
-        print(f"{BAD if production else WARN} 5.7 rate limiting")
-    else:
-        print(
-            f"{OK} 5.7 rate limiting "
-            f"({settings.agent_turns_per_hour} turns/h, "
-            f"{settings.dangerous_ops_per_hour} high-risk/h)"
-        )
-
-    # --- 5.2 approvals -----------------------------------------------
-    if settings.approval_timeout_seconds <= 0:
-        problems.append(
-            "APPROVAL_TIMEOUT_SECONDS must be positive. An approval "
-            "that waits forever leaks a request slot."
-        )
-        print(f"{BAD} 5.2 approvals")
-    else:
-        print(
-            f"{OK} 5.2 approvals "
-            f"({settings.approval_timeout_seconds}s timeout)"
-        )
-
-    # --- 5.3 OAuth ----------------------------------------------------
-    from api.oauth import supports_oauth
-
-    configured = [
-        key
-        for key in ("github", "google_drive", "google_calendar", "slack")
-        if supports_oauth(settings, key)
-    ]
-
-    if production and not configured:
-        warnings.append(
-            "No OAuth provider is configured, so users can only connect "
-            "services by pasting a personal access token."
-        )
-
-    print(
-        f"{OK} 5.3 OAuth "
-        f"({len(configured)} provider(s): {', '.join(configured) or 'none'})"
-    )
-
-    if production and settings.oauth_redirect_base.startswith("http://"):
-        problems.append(
-            "OAUTH_REDIRECT_BASE is http://. An authorization code sent "
-            "over plaintext is an authorization code anyone on the path "
-            "can use."
-        )
-
-    # --- transport ----------------------------------------------------
-    if production and not settings.frontend_base_url.startswith("https://"):
-        problems.append(
-            "FRONTEND_BASE_URL is not https. The refresh-token cookie "
-            "needs Secure, and Secure needs TLS."
-        )
+    found = problems(checks)
+    notes = advisories(checks)
 
     if production:
         print(f"{OK} docs disabled (/docs and /redoc are off)")
 
     # --- 5.8 the audit trail ------------------------------------------
     #
-    # The only control on this list that lives in the DATABASE rather
-    # than the application - and the only one the application cannot
-    # give itself.
+    # STAYS HERE, and is the reason this script still exists separately.
+    # It performs I/O - a real connection and two catalogue queries - so
+    # it cannot run inside the synchronous create_app() path the way
+    # everything above now does.
+    #
+    # It is also the only control on the list that lives in the DATABASE
+    # rather than the application, and therefore the only one the
+    # application cannot grant itself.
     try:
         import asyncio as _asyncio
 
@@ -214,13 +125,16 @@ def main() -> int:
         superuser, can_delete = _asyncio.run(_audit_role())
 
         if can_delete or superuser:
-            (problems if production else warnings).append(
+            message = (
                 "The API connects as a role that can DELETE from "
                 "audit_log"
                 + (" (it is a SUPERUSER)" if superuser else "")
                 + ". The append-only rule is a convention, not a "
                 "control - run scripts/setup_db_roles.py."
             )
+
+            (found if production else notes).append(message)
+
             print(f"{BAD if production else WARN} 5.8 append-only audit log")
 
         else:
@@ -229,26 +143,15 @@ def main() -> int:
     except Exception as exc:
         print(f"{WARN} 5.8 audit role not checked: {type(exc).__name__}")
 
-    # --- the single-worker constraint ---------------------------------
-    #
-    # Not readable from here - it is a uvicorn flag - so it is always a
-    # warning. It matters twice over: the approval notifier and the
-    # rate limiter both hold state in ONE process's memory.
-    warnings.append(
-        "Run ONE uvicorn worker until Redis (Phase 6). With N workers "
-        "the rate limits become N times larger and approvals resolved "
-        "on the wrong worker time out."
-    )
-
     # --- report -------------------------------------------------------
-    if warnings:
+    if notes:
         print("\nWorth knowing:\n")
-        for warning in warnings:
-            print(f"  - {warning}")
+        for note in notes:
+            print(f"  - {note}")
 
-    if problems:
+    if found:
         print("\nNOT READY:\n")
-        for problem in problems:
+        for problem in found:
             print(f"  - {problem}")
 
         return 1

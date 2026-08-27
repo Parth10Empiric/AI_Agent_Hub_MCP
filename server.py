@@ -1,4 +1,17 @@
 from core.logging import setup_logging, get_logger
+
+# CONFIGURED HERE, BEFORE THE IMPORTS BELOW - not only in main().
+#
+# The service imports further down pull in google.api_core, which emits
+# a deprecation warning the instant it loads. A logging configuration
+# that runs inside main() is set up AFTER that has already happened, so
+# the warning escapes to stderr raw - no level, no timestamp, and in
+# production no JSON, which makes it an unparseable fragment in the
+# middle of a JSON stream that a log shipper drops without a word.
+#
+# Idempotent: main() calls it again, which is harmless and keeps the
+# normal startup path readable.
+setup_logging()
 from core.shutdown import GracefulShutdown
 from core.tenancy import CredentialMiddleware, env_credentials_allowed
 

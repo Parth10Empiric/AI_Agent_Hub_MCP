@@ -61,3 +61,28 @@ def current_request_id() -> str | None:
 
 def current_ip() -> str | None:
     return _CLIENT_IP.get()
+
+
+def log_fields() -> dict[str, str | None]:
+    """
+    The ambient context, shaped for a log record (Phase 6.5).
+
+    Handed to core.logging.setup_logging(), which calls it once per log
+    record and copies the result onto that record. The effect is that
+    EVERY line produced while serving a request carries the request id,
+    without a single logger.info() call being changed - and, more
+    importantly, without any of them being able to forget.
+
+    That is the whole value of a correlation id. One that is present on
+    95% of lines is not 95% as useful; the missing 5% are exactly the
+    lines you go looking for when something has gone wrong.
+
+    Returns None values outside a request - a startup line, a
+    background task - and the filter drops those rather than writing
+    "request_id": null on every boot message.
+    """
+
+    return {
+        "request_id": current_request_id(),
+        "client_ip": current_ip(),
+    }

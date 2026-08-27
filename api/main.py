@@ -36,6 +36,8 @@ from api.middleware import (
     SecurityHeadersMiddleware,
 )
 from api.notifier import build_approval_notifier
+from api.preflight import advisories, enforce
+from api.request_context import log_fields
 from api.ratelimit import build_rate_limiter
 from api.settings import APISettings, get_settings
 
@@ -198,7 +200,27 @@ def create_app(settings: APISettings | None = None) -> FastAPI:
 
     settings = settings or get_settings()
 
-    setup_logging()
+    # Pass the request-context accessors, so every log line emitted
+    # while serving a request carries its request_id (Phase 6.5).
+    # server.py calls setup_logging() with no argument - it is a
+    # subprocess with no HTTP request to describe.
+    setup_logging(log_fields)
+
+    # VALIDATE BEFORE BUILDING ANYTHING (Phase 6.1).
+    #
+    # First statement after logging, and deliberately before the
+    # FastAPI() call: in production a configuration problem must stop
+    # the process here, while it is still a startup crash that the
+    # deploy pipeline sees. A few lines later there would be an app
+    # object, a lifespan handler and an open socket - and an
+    # orchestrator that reads an open socket as "up" would send this
+    # container traffic it cannot serve.
+    #
+    # Outside production this only records advice. See api/preflight.py
+    # for why the strict reading is bought with API_ENVIRONMENT and not
+    # applied everywhere.
+    for advisory in advisories(enforce(settings)):
+        logger.warning("preflight: %s", advisory)
 
     app = FastAPI(
         title=settings.api_title,
