@@ -59,3 +59,11 @@ next-env.d.ts
 # build output from the e2e/verify runs
 /.next-verify/
 /.next-e2e/
+
+# the documentation capture (npm run capture)
+#
+# Its own production build, and Playwright's per-test artefacts. The
+# images it produces are NOT here - those go to ../docs/media and are
+# committed, because the READMEs embed them.
+/.next-demo/
+/tests/demo/.output/

@@ -35,7 +35,13 @@ export function ToolTimeline({
   const finished = rows.filter((r) => !r.pending).length;
 
   return (
-    <div className="my-3 overflow-hidden rounded-lg border bg-muted/30">
+    <div
+      // Same purpose as data-testid on the approval card: a name that
+      // survives restyling, so a test - or the documentation capture -
+      // can address this block without depending on its classes.
+      data-testid="tool-timeline"
+      className="my-3 overflow-hidden rounded-lg border bg-muted/30"
+    >
       <div className="flex items-center justify-between border-b bg-muted/50 px-3 py-1.5">
         {/* Two SIBLING spans, not a nested one. Nested, the outer
             element's text content is "Tools1 of 1", so nothing on the

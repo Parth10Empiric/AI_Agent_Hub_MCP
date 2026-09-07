@@ -13,23 +13,33 @@ yet, a folder structure, and a **milestone** you can actually test.
 
 | Phase | What it delivers | Status |
 |---|---|---|
-| **Phase 1** | MCP server — GitHub, Drive, Slack, Calendar | ✅ **Complete** — 61 tools |
-| **[Phase 2](Phase2.md)** | Agent Engine — discovery, routing, execution | ✅ **Complete** — 147 tests |
-| **[Phase 3](Phase3.md)** | Backend — FastAPI, PostgreSQL, auth, chat API | ⬜ Not started |
-| **[Phase 4](Phase4.md)** | Frontend — Next.js, agent builder, chat UI | ⬜ Not started |
-| **[Phase 5](Phase5.md)** | Security — permissions, OAuth, multi-tenancy | ⬜ Not started |
-| **[Phase 6](Phase6.md)** | Production — Docker, CI/CD, observability | ⬜ Not started |
+| **Phase 1** | MCP server — GitHub, Drive, Slack, Calendar | ✅ **Complete** — 161 tools |
+| **[Phase 2](Phase2.md)** | Agent Engine — discovery, routing, execution | ✅ **Complete** |
+| **[Phase 3](Phase3.md)** | Backend — FastAPI, PostgreSQL, auth, chat API | ✅ **Complete** |
+| **[Phase 4](Phase4.md)** | Frontend — Next.js, agent builder, chat UI | ✅ **Complete** |
+| **[Phase 5](Phase5.md)** | Security — permissions, OAuth, multi-tenancy | ✅ **Complete** |
+| **[Phase 6](Phase6.md)** | Production — Docker, CI/CD, observability | ✅ **Complete** |
 | **[V2](V2.md)** | Platform — custom MCP, memory, workflows | ⬜ Future |
 | **[V3](V3.md)** | Scale — multi-agent, SDK, enterprise | ⬜ Speculative |
 
-**Phases 1–6 are V1.** V1 is a complete, sellable product. Everything
-after is expansion.
+**Phases 1–6 are V1, and V1 is built.** Everything after is expansion.
+Work is **paused as of September 2026** — see [Where it
+stands](../README.md#where-it-stands) in the root README for the known
+gaps.
+
+> **These documents are PLANS, and they are not revised as built.** The
+> status column above is kept current; the phase documents themselves
+> record what was intended before the work started, which is worth
+> keeping intact — several decisions changed once the code met reality,
+> and the difference is instructive. For how each phase actually turned
+> out, read [`../devloper_docs/`](../devloper_docs/) and the code.
 
 ---
 
 ## Reading order
 
-**Building next?** → [Phase3.md](Phase3.md)
+**Picking the project back up?** →
+[the root README](../README.md#where-it-stands)
 
 **Learning how the engine works?** →
 [`../devloper_docs/Understand_Phse2.md`](../devloper_docs/Understand_Phse2.md)

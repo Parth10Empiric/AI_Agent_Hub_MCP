@@ -9,7 +9,8 @@
     "lint": "eslint",
     "gen:api": "openapi-typescript ${API_URL:-http://127.0.0.1:8077}/openapi.json -o lib/api/schema.d.ts",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "capture": "playwright test --config playwright.demo.config.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
